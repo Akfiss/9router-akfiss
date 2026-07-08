@@ -26,12 +26,9 @@ export default {
     // not its vendor-native thinking shape. Force the openai thinking format.
     thinkingFormat: "openai",
     headers: {
-      "User-Agent": "CLI/2.108.1 CodeBuddy/2.108.1",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       "X-Product": "SaaS",
-      "X-IDE-Type": "CLI",
-      "X-IDE-Name": "CLI",
       "x-requested-with": "XMLHttpRequest",
-      "x-codebuddy-request": "1",
     },
     auth: {
       combined: true,

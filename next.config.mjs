@@ -12,14 +12,13 @@ const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   distDir: process.env.NEXT_DIST_DIR || ".next",
-  output: "standalone",
   serverExternalPackages: ["better-sqlite3", "sql.js", "node:sqlite", "bun:sqlite"],
   turbopack: {
     root: tracingRoot
   },
-  outputFileTracingRoot: tracingRoot,
+  outputFileTracingRoot: projectRoot,
   outputFileTracingExcludes: {
-    "*": ["./gitbook/**/*"]
+    "*": ["./gitbook/**/*", "./node_modules/.cache/**/*", "../../**/*"]
   },
   images: {
     unoptimized: true
