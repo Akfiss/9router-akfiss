@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
+import { atomicWriteFile } from "@/lib/utils/atomicWrite";
 import path from "path";
 import os from "os";
 
@@ -94,11 +95,11 @@ export async function POST(request) {
     globalState.openAiBaseUrl = normalizedBaseUrl;
     globalState.openAiModelId = model;
     globalState.planModeOpenAiModelId = model;
-    await fs.writeFile(getGlobalStatePath(), JSON.stringify(globalState, null, 2));
+    await atomicWriteFile(getGlobalStatePath(), JSON.stringify(globalState, null, 2));
 
     const secrets = (await readJson(getSecretsPath())) || {};
     secrets.openAiApiKey = apiKey;
-    await fs.writeFile(getSecretsPath(), JSON.stringify(secrets, null, 2));
+    await atomicWriteFile(getSecretsPath(), JSON.stringify(secrets, null, 2), { mode: 0o600 });
 
     return NextResponse.json({ success: true, message: "Cline settings applied successfully!", globalStatePath: getGlobalStatePath() });
   } catch (error) {
@@ -121,11 +122,11 @@ export async function DELETE() {
       globalState.actModeApiProvider = "cline";
       globalState.planModeApiProvider = "cline";
     }
-    await fs.writeFile(getGlobalStatePath(), JSON.stringify(globalState, null, 2));
+    await atomicWriteFile(getGlobalStatePath(), JSON.stringify(globalState, null, 2));
 
     const secrets = (await readJson(getSecretsPath())) || {};
     delete secrets.openAiApiKey;
-    await fs.writeFile(getSecretsPath(), JSON.stringify(secrets, null, 2));
+    await atomicWriteFile(getSecretsPath(), JSON.stringify(secrets, null, 2), { mode: 0o600 });
 
     return NextResponse.json({ success: true, message: "9Router settings removed from Cline" });
   } catch (error) {

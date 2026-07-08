@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
+import { atomicWriteFile } from "@/lib/utils/atomicWrite";
 import path from "path";
 import os from "os";
 
@@ -131,7 +132,7 @@ const writeAgentModels = async (agentDir, model, baseUrl, apiKey) => {
     api: "openai-completions",
     models: [{ id: model, name: model.split("/").pop() || model }],
   };
-  await fs.writeFile(modelsPath, JSON.stringify(existing, null, 2));
+  await atomicWriteFile(modelsPath, JSON.stringify(existing, null, 2));
 };
 
 // POST - Update 9Router settings (merge with existing settings)
@@ -221,7 +222,7 @@ export async function POST(request) {
       );
     }
 
-    await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
+    await atomicWriteFile(settingsPath, JSON.stringify(settings, null, 2));
 
     return NextResponse.json({
       success: true,
@@ -281,7 +282,7 @@ export async function DELETE() {
     }
 
     // Write updated settings
-    await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
+    await atomicWriteFile(settingsPath, JSON.stringify(settings, null, 2));
 
     return NextResponse.json({
       success: true,

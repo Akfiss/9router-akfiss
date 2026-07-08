@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
+import { atomicWriteFile } from "@/lib/utils/atomicWrite";
 import path from "path";
 import os from "os";
 
@@ -133,13 +134,13 @@ export async function POST(request) {
     // Update config.yaml — replace/insert model: block, keep everything else
     const existingYaml = await readConfigYaml();
     const newYaml = upsertModelBlock(existingYaml, buildModelBlock(model, normalizedBaseUrl));
-    await fs.writeFile(getHermesConfigPath(), newYaml);
+    await atomicWriteFile(getHermesConfigPath(), newYaml);
 
     // Update .env — upsert OPENAI_API_KEY only when caller provides one
     if (apiKey) {
       const existingEnv = await readEnvFile();
       const newEnv = upsertEnvVar(existingEnv, API_KEY_ENV, apiKey);
-      await fs.writeFile(getHermesEnvPath(), newEnv);
+      await atomicWriteFile(getHermesEnvPath(), newEnv, { mode: 0o600 });
     }
 
     return NextResponse.json({
@@ -166,7 +167,7 @@ export async function DELETE() {
       throw error;
     }
     const newYaml = removeModelBlock(yaml);
-    await fs.writeFile(configPath, newYaml);
+    await atomicWriteFile(configPath, newYaml);
     return NextResponse.json({ success: true, message: `${PROVIDER_NAME} model block removed` });
   } catch (error) {
     console.log("Error resetting hermes settings:", error);

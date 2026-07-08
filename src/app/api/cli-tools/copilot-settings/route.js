@@ -2,6 +2,7 @@
 
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
+import { atomicWriteFile } from "@/lib/utils/atomicWrite";
 import path from "path";
 import os from "os";
 
@@ -106,7 +107,7 @@ export async function POST(request) {
       config.push(newEntry);
     }
 
-    await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+    await atomicWriteFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
 
     return NextResponse.json({
       success: true,
@@ -137,7 +138,7 @@ export async function DELETE() {
     }
 
     config = config.filter((e) => e.name !== "9Router");
-    await fs.writeFile(configPath, JSON.stringify(config, null, 2));
+    await atomicWriteFile(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
 
     return NextResponse.json({
       success: true,
