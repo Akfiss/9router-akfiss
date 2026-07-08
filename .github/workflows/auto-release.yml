@@ -1,0 +1,43 @@
+name: Auto Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            echo "is_tag=true" >> $GITHUB_OUTPUT
+          else
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -n "$TAG" ]; then
+              echo "name=${TAG}-dev.${{ github.run_number }}" >> $GITHUB_OUTPUT
+            else
+              echo "name=v0.0.0-dev.${{ github.run_number }}" >> $GITHUB_OUTPUT
+            fi
+            echo "is_tag=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create release
+        if: steps.version.outputs.is_tag == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.name }}
+          generate_release_notes: true
+          prerelease: false
