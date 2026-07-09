@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
+import { atomicWriteFile } from "@/lib/utils/atomicWrite";
 import path from "path";
 import os from "os";
 import { parseTOML, stringifyTOML } from "confbox";
@@ -149,7 +150,7 @@ export async function POST(request) {
 
     // Write merged config
     const configContent = stringifyTOML(parsed);
-    await fs.writeFile(configPath, configContent);
+    await atomicWriteFile(configPath, configContent);
 
     // Update auth.json with OPENAI_API_KEY (Codex reads this first)
     const authPath = getCodexAuthPath();
@@ -162,7 +163,7 @@ export async function POST(request) {
     // Force apikey mode (keep existing tokens untouched for ChatGPT login reuse)
     authData.OPENAI_API_KEY = apiKey;
     authData.auth_mode = "apikey";
-    await fs.writeFile(authPath, JSON.stringify(authData, null, 2));
+    await atomicWriteFile(authPath, JSON.stringify(authData, null, 2), { mode: 0o600 });
 
     return NextResponse.json({
       success: true,
@@ -209,7 +210,7 @@ export async function DELETE() {
 
     // Write updated config
     const configContent = stringifyTOML(parsed);
-    await fs.writeFile(configPath, configContent);
+    await atomicWriteFile(configPath, configContent);
 
     // Remove OPENAI_API_KEY from auth.json
     const authPath = getCodexAuthPath();
@@ -223,7 +224,7 @@ export async function DELETE() {
       if (Object.keys(authData).length === 0) {
         await fs.unlink(authPath);
       } else {
-        await fs.writeFile(authPath, JSON.stringify(authData, null, 2));
+        await atomicWriteFile(authPath, JSON.stringify(authData, null, 2), { mode: 0o600 });
       }
     } catch { /* No auth file */ }
 

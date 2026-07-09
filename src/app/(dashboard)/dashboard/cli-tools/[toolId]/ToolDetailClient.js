@@ -11,6 +11,7 @@ import {
   CopilotToolCard, ClineToolCard, KiloToolCard, DeepSeekTuiToolCard,
   JcodeToolCard,
 } from "../components";
+import SnippetViewer from "../components/SnippetViewer";
 
 const CLOUD_URL = process.env.NEXT_PUBLIC_CLOUD_URL;
 
@@ -167,7 +168,19 @@ export default function ToolDetailClient({ toolId, machineId }) {
         <h1 className="text-xl font-semibold text-text-main sm:text-2xl">{tool.name}</h1>
         <p className="text-sm text-text-muted">{tool.description}</p>
       </div>
-      {loading ? <CardSkeleton /> : renderToolCard()}
+      {loading ? <CardSkeleton /> : (
+        <>
+          {renderToolCard()}
+          {tool.configType === "custom" && (
+            <SnippetViewer
+              toolId={toolId}
+              baseUrl={getBaseUrl()}
+              apiKeys={apiKeys}
+              availableModels={getAllAvailableModels()}
+            />
+          )}
+        </>
+      )}
     </div>
   );
 }

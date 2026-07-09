@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
+import { atomicWriteFile } from "@/lib/utils/atomicWrite";
 import path from "path";
 import os from "os";
 
@@ -133,7 +134,7 @@ export async function POST(request) {
         await fs.mkdir(dir, { recursive: true });
 
         const newConfig = build9RouterConfig(baseUrl, apiKey || "sk_9router", model);
-        await fs.writeFile(getDeepSeekConfigPath(), newConfig);
+        await atomicWriteFile(getDeepSeekConfigPath(), newConfig, { mode: 0o600 });
 
         return NextResponse.json({
             success: true,
@@ -155,7 +156,7 @@ export async function DELETE() {
             return NextResponse.json({ success: true, message: "No config file to reset" });
         }
 
-        await fs.writeFile(configPath, DEFAULT_CONFIG);
+        await atomicWriteFile(configPath, DEFAULT_CONFIG, { mode: 0o600 });
         return NextResponse.json({ success: true, message: `${PROVIDER_NAME} config reset to DeepSeek defaults` });
     } catch (error) {
         console.log("Error resetting deepseek-tui settings:", error);

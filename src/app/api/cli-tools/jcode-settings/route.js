@@ -2,6 +2,7 @@
 
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
+import { atomicWriteFile } from "@/lib/utils/atomicWrite";
 import path from "path";
 import os from "os";
 import { exec } from "child_process";
@@ -63,7 +64,7 @@ const has9RouterConfig = (config) => {
 const writeConfig = async (config) => {
   const configPath = getConfigPath();
   const content = stringifyTOML(config);
-  await fs.writeFile(configPath, content, "utf-8");
+  await atomicWriteFile(configPath, content, "utf-8");
 };
 
 const readProviderEnv = async () => {
@@ -104,7 +105,7 @@ const writeProviderEnv = async (env) => {
     content += `${key}="${value}"\n`;
   }
 
-  await fs.writeFile(envPath, content, "utf-8");
+  await atomicWriteFile(envPath, content, "utf-8");
 };
 
 export async function GET() {
