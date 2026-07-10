@@ -21,7 +21,6 @@ import AddApiKeyModal from "./AddApiKeyModal";
 import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
-import AutoclawImportModal from "./AutoclawImportModal";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
 
@@ -48,7 +47,6 @@ export default function ProviderDetailPage() {
   const [showAddApiKeyModal, setShowAddApiKeyModal] = useState(false);
   const [addConnectionError, setAddConnectionError] = useState("");
   const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
-  const [showAutoclawImport, setShowAutoclawImport] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showEditNodeModal, setShowEditNodeModal] = useState(false);
   const [showBulkProxyModal, setShowBulkProxyModal] = useState(false);
@@ -1475,11 +1473,6 @@ export default function ProviderDetailPage() {
                         {translate("Bulk Add")}
                       </Button>
                     )}
-                    {providerId === "autoclaw" && (
-                      <Button size="sm" icon="token" variant="secondary" onClick={() => setShowAutoclawImport(true)}>
-                        Import Token
-                      </Button>
-                    )}
                     <Button
                       size="sm"
                       icon="add"
@@ -1671,13 +1664,6 @@ export default function ProviderDetailPage() {
           isOpen={showIFlowCookieModal}
           onSuccess={handleIFlowCookieSuccess}
           onClose={() => setShowIFlowCookieModal(false)}
-        />
-      )}
-      {providerId === "autoclaw" && (
-        <AutoclawImportModal
-          isOpen={showAutoclawImport}
-          onSaved={fetchConnections}
-          onClose={() => setShowAutoclawImport(false)}
         />
       )}
       <AddApiKeyModal
