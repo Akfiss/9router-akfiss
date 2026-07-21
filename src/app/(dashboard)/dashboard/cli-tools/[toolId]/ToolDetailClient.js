@@ -9,7 +9,7 @@ import {
   ClaudeToolCard, CodexToolCard, DroidToolCard, OpenClawToolCard,
   HermesToolCard, DefaultToolCard, OpenCodeToolCard, CoworkToolCard,
   CopilotToolCard, ClineToolCard, KiloToolCard, DeepSeekTuiToolCard,
-  JcodeToolCard,
+  JcodeToolCard, GrokBuildToolCard,
 } from "../components";
 import SnippetViewer from "../components/SnippetViewer";
 
@@ -140,6 +140,8 @@ export default function ToolDetailClient({ toolId, machineId }) {
         return <DeepSeekTuiToolCard {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} />;
       case "jcode":
         return <JcodeToolCard {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} />;
+      case "grok-build":
+        return <GrokBuildToolCard {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} />;
       default:
         return <DefaultToolCard toolId={toolId} {...commonProps} activeProviders={getActiveProviders()} cloudEnabled={cloudEnabled} tunnelEnabled={tunnelEnabled} />;
     }
