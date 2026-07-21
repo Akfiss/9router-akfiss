@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
+import { atomicWriteFile } from "@/lib/utils/atomicWrite";
 import path from "path";
 import os from "os";
 import { getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
@@ -113,7 +114,7 @@ export async function POST(request) {
       contextWindow: normalizeContextWindow(contextWindow, selectedModel),
       subagentModels: normalizeSubagentModels(subagentModels),
     });
-    await fs.writeFile(getGrokConfigPath(), toml);
+    await atomicWriteFile(getGrokConfigPath(), toml, { mode: 0o600 });
 
     return NextResponse.json({
       success: true,
@@ -140,7 +141,7 @@ export async function DELETE() {
       throw error;
     }
 
-    await fs.writeFile(configPath, resetGrokBuildConfig(toml));
+    await atomicWriteFile(configPath, resetGrokBuildConfig(toml), { mode: 0o600 });
     return NextResponse.json({
       success: true,
       message: "9router model slots removed from Grok Build",

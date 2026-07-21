@@ -433,6 +433,38 @@ OPENAI_API_KEY="${apiKey || "sk_9router"}"
   };
 }
 
+// ─── Grok Build ───────────────────────────────────────────────────────────
+export function buildGrokBuildSnippet({ baseUrl, apiKey, model, contextWindow }) {
+  if (!baseUrl || !model) throw new Error("baseUrl and model are required");
+
+  const normalized = baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
+  const ctx = contextWindow || 131072;
+
+  const toml = `[models.9router]
+model = "${model}"
+base_url = "${normalized}"
+api_key = "${apiKey || "sk_9router"}"
+context_window = ${ctx}
+name = "9Router"
+
+[models]
+default = "9router"
+`;
+
+  return {
+    tool: "grok-build",
+    files: [
+      {
+        path: "~/.grok/config.toml",
+        content: toml,
+        language: "toml",
+        isCredential: true,
+      },
+    ],
+    summary: "Write this to ~/.grok/config.toml (replaces existing content)",
+  };
+}
+
 // ─── Registry ──────────────────────────────────────────────────────────────
 export const SNIPPET_BUILDERS = {
   claude: buildClaudeSnippet,
@@ -446,6 +478,7 @@ export const SNIPPET_BUILDERS = {
   copilot: buildCopilotSnippet,
   "deepseek-tui": buildDeepSeekSnippet,
   jcode: buildJcodeSnippet,
+  "grok-build": buildGrokBuildSnippet,
 };
 
 export function buildSnippet(toolId, params) {

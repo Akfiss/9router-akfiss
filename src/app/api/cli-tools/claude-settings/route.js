@@ -50,7 +50,7 @@ const writeClaudeJsonMcp = async (mcpServers) => {
     delete data.mcpServers.exa;
     if (Object.keys(data.mcpServers).length === 0) delete data.mcpServers;
   }
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2));
+  await atomicWriteFile(filePath, JSON.stringify(data, null, 2));
 };
 
 
