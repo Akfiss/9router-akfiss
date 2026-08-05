@@ -38,6 +38,9 @@ export default {
       header: "Authorization",
       scheme: "bearer",
     },
+    usage: {
+      url: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
+    },
   },
   // Same model lineup exposed by the CN gateway — intl backend is the same catalog.
   models: [
