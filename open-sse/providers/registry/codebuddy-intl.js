@@ -38,6 +38,7 @@ export default {
       header: "Authorization",
       scheme: "bearer",
     },
+    // Intl billing endpoint mirrors CN shape (data.Response.Data.Accounts[]).
     usage: {
       url: "https://www.codebuddy.ai/v2/billing/meter/get-user-resource",
     },
