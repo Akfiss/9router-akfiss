@@ -480,10 +480,13 @@ describe("wrapStreamControllerForBansos — interrupted usage + release (Step 1:
     expect(bansosContext.release).toHaveBeenCalledTimes(1);
   });
 
-  it("handleComplete: calls the original handler and releases, but writes NO usage row (success path already wrote one via onStreamComplete)", () => {
+  it("handleComplete: calls the original handler and releases, but writes NO usage row WHEN completionState confirms onStreamComplete already ran", () => {
     const raw = makeFakeController();
     const bansosContext = makeBansosContext();
-    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo);
+    // completionState.completed:true is the marker buildOnStreamComplete's
+    // onStreamComplete sets the moment it actually runs and calls
+    // saveUsageStats — i.e. the success row already exists.
+    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo, { completed: true });
 
     wrapped.handleComplete();
 
@@ -492,7 +495,45 @@ describe("wrapStreamControllerForBansos — interrupted usage + release (Step 1:
     expect(bansosContext.release).toHaveBeenCalledTimes(1);
   });
 
-  it("writes the interrupted row at most once even if more than one hook fires for the same request", () => {
+  // --- Finding 1 (task-9 review round 1): a successfully-served stream must
+  // never end up with ZERO usageHistory rows. open-sse/utils/stream.js's
+  // flush() wraps its whole body (including both onStreamComplete call
+  // sites) in a try/catch that swallows without rethrowing — if anything
+  // throws before reaching onStreamComplete, flush() still returns
+  // normally, the stream still closes, and handleComplete() still fires,
+  // but onStreamComplete never ran and no row was ever written. This
+  // simulates exactly that: calling the wrapped controller's handleComplete()
+  // directly without ever invoking the real onStreamComplete callback first.
+  it("handleComplete: when completionState is missing/not-completed (onStreamComplete never ran), writes a fallback interrupted/unavailable row instead of silently writing zero rows", () => {
+    const raw = makeFakeController();
+    const bansosContext = makeBansosContext();
+    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo, { completed: false });
+
+    wrapped.handleComplete();
+
+    expect(raw.handleComplete).toHaveBeenCalledTimes(1);
+    expect(mocks.saveRequestUsage).toHaveBeenCalledTimes(1);
+    const entry = mocks.saveRequestUsage.mock.calls[0][0];
+    expect(entry.status).toBe("interrupted");
+    expect(entry.meta).toEqual(expect.objectContaining({
+      bansosUserId: "user-123", bansosApiKeyId: "key-456", bansosRequestId: "req-789",
+      tokensUnavailable: true,
+    }));
+    expect(bansosContext.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("handleComplete: with NO completionState argument at all, defaults to the safe assumption (not completed) and still writes the fallback row", () => {
+    const raw = makeFakeController();
+    const bansosContext = makeBansosContext();
+    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo); // no 4th arg
+
+    wrapped.handleComplete();
+
+    expect(mocks.saveRequestUsage).toHaveBeenCalledTimes(1);
+    expect(mocks.saveRequestUsage.mock.calls[0][0].status).toBe("interrupted");
+  });
+
+  it("writes the interrupted row at most once even if more than one hook fires for the same request (handleError then handleComplete)", () => {
     const raw = makeFakeController();
     const bansosContext = makeBansosContext();
     const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo);
@@ -501,6 +542,135 @@ describe("wrapStreamControllerForBansos — interrupted usage + release (Step 1:
     wrapped.handleComplete(); // defensive extra call — should not double-write
 
     expect(mocks.saveRequestUsage).toHaveBeenCalledTimes(1);
+  });
+
+  // --- Finding 2 (task-9 review round 1): the wrapper must ITSELF enforce
+  // "at most one of handleComplete/handleError/handleDisconnect ever does
+  // real work" rather than merely assume it from createStreamController's
+  // internal `disconnected` flag (which only guards the RAW controller's
+  // own logging/callback side effects, not this wrapper's added writes).
+  // The risky, previously-uncovered ordering is the REVERSE of the test
+  // above: a successful handleComplete fires first, and a late
+  // handleError/handleDisconnect fires afterward on the same wrapped
+  // instance — that must NOT produce a second, spurious interrupted row.
+  it("handleComplete (success, completionState.completed:true) followed by a late handleError: does not write a second interrupted row", () => {
+    const raw = makeFakeController();
+    const bansosContext = makeBansosContext();
+    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo, { completed: true });
+
+    wrapped.handleComplete();
+    wrapped.handleError(new Error("late error after close"));
+
+    expect(raw.handleComplete).toHaveBeenCalledTimes(1);
+    expect(raw.handleError).toHaveBeenCalledTimes(1); // still delegates to the raw controller
+    expect(mocks.saveRequestUsage).not.toHaveBeenCalled(); // no interrupted row written by the wrapper
+  });
+
+  it("handleComplete (success, completionState.completed:true) followed by a late handleDisconnect: does not write a second interrupted row", () => {
+    const raw = makeFakeController();
+    const bansosContext = makeBansosContext();
+    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo, { completed: true });
+
+    wrapped.handleComplete();
+    wrapped.handleDisconnect("client_closed");
+
+    expect(raw.handleDisconnect).toHaveBeenCalledTimes(1);
+    expect(mocks.saveRequestUsage).not.toHaveBeenCalled();
+  });
+});
+
+// --- Integration-level ordering guarantees (Findings 1 & 2, task-9 review
+// round 1): buildOnStreamComplete and wrapStreamControllerForBansos wired
+// together exactly as handleStreamingResponse wires them — via the
+// completionState object attached to the built onStreamComplete function
+// (onStreamComplete.completionState) — proving the FULL contract end to
+// end: exactly one usageHistory row for a real success-then-late-failure
+// ordering, and a fallback row (not zero rows) when onStreamComplete never
+// actually ran before the stream "completed".
+describe("wrapStreamControllerForBansos + buildOnStreamComplete — real completionState wiring", () => {
+  function makeFakeController() {
+    return {
+      signal: {}, startTime: Date.now(),
+      isConnected: vi.fn(() => true),
+      handleComplete: vi.fn(),
+      handleError: vi.fn(),
+      handleDisconnect: vi.fn(),
+      abort: vi.fn(),
+    };
+  }
+  const streamArgs = (overrides = {}) => ({
+    provider: "grok-cli", model: "grok-4.5", connectionId: "conn-1", apiKey: "bansos-internal",
+    requestStartTime: Date.now(), body: { messages: [] }, stream: true,
+    finalBody: null, translatedBody: {}, clientRawRequest: { endpoint: "/v1/chat/completions" },
+    pxpipe: null, reqTag: "", log: null,
+    ...overrides,
+  });
+  const ctxInfo = { provider: "grok-cli", model: "grok-4.5", connectionId: "conn-1", apiKey: "bansos-internal", endpoint: "/v1/chat/completions" };
+
+  it("buildOnStreamComplete exposes completionState on the returned onStreamComplete function, unset until it actually runs", () => {
+    const bansosContext = makeBansosContext();
+    const { onStreamComplete, completionState } = buildOnStreamComplete(streamArgs({ bansosContext }));
+
+    expect(onStreamComplete.completionState).toBe(completionState);
+    expect(completionState.completed).toBe(false);
+
+    onStreamComplete({ content: "hi", thinking: null }, { prompt_tokens: 20, completion_tokens: 10 }, Date.now());
+
+    expect(completionState.completed).toBe(true);
+  });
+
+  it("handleComplete fires first (real success via onStreamComplete), then a late handleError fires: exactly ONE usageHistory row exists (the success row), not two", () => {
+    const bansosContext = makeBansosContext();
+    const { onStreamComplete, completionState } = buildOnStreamComplete(streamArgs({ bansosContext }));
+    const raw = makeFakeController();
+    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo, completionState);
+
+    // Normal end-of-stream: flush() calls onStreamComplete (writes the
+    // success row + releases), then the disconnect-aware ReadableStream's
+    // pull() sees `done` and calls handleComplete().
+    onStreamComplete({ content: "hi", thinking: null }, { prompt_tokens: 20, completion_tokens: 10 }, Date.now());
+    wrapped.handleComplete();
+
+    // A late handleError somehow still fires afterward — the scenario
+    // Finding 2 flags as not actually impossible today, just unenforced by
+    // this wrapper's own code.
+    wrapped.handleError(new Error("late error after close"));
+
+    expect(mocks.saveRequestUsage).toHaveBeenCalledTimes(1);
+    expect(mocks.saveRequestUsage.mock.calls[0][0].status).toBe("success");
+    expect(raw.handleError).toHaveBeenCalledTimes(1); // still delegates to raw controller
+  });
+
+  it("handleComplete fires first (real success via onStreamComplete), then a late handleDisconnect fires: still exactly ONE usageHistory row", () => {
+    const bansosContext = makeBansosContext();
+    const { onStreamComplete, completionState } = buildOnStreamComplete(streamArgs({ bansosContext }));
+    const raw = makeFakeController();
+    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo, completionState);
+
+    onStreamComplete({ content: "hi", thinking: null }, { prompt_tokens: 20, completion_tokens: 10 }, Date.now());
+    wrapped.handleComplete();
+    wrapped.handleDisconnect("client_closed");
+
+    expect(mocks.saveRequestUsage).toHaveBeenCalledTimes(1);
+    expect(mocks.saveRequestUsage.mock.calls[0][0].status).toBe("success");
+  });
+
+  it("Finding 1: handleComplete fires WITHOUT onStreamComplete ever having run (flush() swallowed an exception before reaching it) — writes a fallback interrupted/unavailable row instead of ending up with zero rows", () => {
+    const bansosContext = makeBansosContext();
+    const { completionState } = buildOnStreamComplete(streamArgs({ bansosContext })); // onStreamComplete deliberately never invoked
+    const raw = makeFakeController();
+    const wrapped = wrapStreamControllerForBansos(raw, bansosContext, ctxInfo, completionState);
+
+    wrapped.handleComplete();
+
+    expect(mocks.saveRequestUsage).toHaveBeenCalledTimes(1);
+    const entry = mocks.saveRequestUsage.mock.calls[0][0];
+    expect(entry.status).toBe("interrupted");
+    expect(entry.meta).toEqual(expect.objectContaining({
+      bansosUserId: "user-123", bansosApiKeyId: "key-456", bansosRequestId: "req-789",
+      tokensUnavailable: true,
+    }));
+    expect(bansosContext.release).toHaveBeenCalledTimes(1);
   });
 });
 
