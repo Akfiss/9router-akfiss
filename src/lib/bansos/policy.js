@@ -6,85 +6,125 @@
 import { BANSOS_HOST, PUBLIC_MODEL } from './constants.js';
 
 /**
+ * Internal helper: Parse a Host header value into components.
+ * Returns an object with hostPart (normalized, no brackets/port), port, and flags.
+ * Only strips brackets for actual IP literals, rejecting bracket-wrapped hostnames.
+ * @private
+ * @param {*} host - The Host header value (may not be a string)
+ * @returns {Object} {hostPart, port, isIPLiteral, isValid}
+ */
+function _parseHostAndPort(host) {
+  // Guard against non-string input
+  if (typeof host !== 'string') {
+    return { hostPart: '', port: null, isIPLiteral: false, isValid: false };
+  }
+
+  let hostPart = host;
+  let port = null;
+  let isIPLiteral = false;
+
+  if (host.startsWith('[')) {
+    // Bracket notation: [ipv6]:port or [ipv6]
+    const endBracket = host.indexOf(']');
+    if (endBracket !== -1) {
+      const bracketed = host.substring(1, endBracket);
+      // Only treat as IP literal if contents contain a colon (IPv6 indicator)
+      if (bracketed.includes(':')) {
+        hostPart = bracketed;
+        isIPLiteral = true;
+        // Extract port after ]
+        if (host.length > endBracket + 1 && host[endBracket + 1] === ':') {
+          port = host.substring(endBracket + 2);
+        }
+      } else {
+        // Bracket-wrapped non-IP hostname (invalid form)
+        return { hostPart: host, port: null, isIPLiteral: false, isValid: false };
+      }
+    }
+  } else if (host.includes(':')) {
+    // Could be host:port or bare IPv6
+    if (host.includes('::')) {
+      // Bare IPv6 (contains ::)
+      hostPart = host;
+      isIPLiteral = true;
+    } else {
+      // host:port (single colon)
+      const parts = host.split(':');
+      hostPart = parts[0];
+      port = parts[1];
+    }
+  }
+
+  return { hostPart, port, isIPLiteral, isValid: true };
+}
+
+/**
  * Normalize a Host header value.
  * Handles: mixed case, explicit port suffixes, IPv6 literals with brackets.
  * @param {string} host - The Host header value
  * @returns {string} Normalized hostname (lowercase, no port, no brackets)
  */
 export function normalizeHost(host) {
-  let normalized = host;
-
-  // Handle IPv6 with brackets: [::1]:port or [::1]
-  if (host.startsWith('[')) {
-    const endBracket = host.indexOf(']');
-    if (endBracket !== -1) {
-      normalized = host.substring(1, endBracket);
-    }
-  } else if (host.includes(':')) {
-    // Check if it's bare IPv6 (contains ::) or host:port
-    if (!host.includes('::')) {
-      // host:port, extract host (everything before first :)
-      normalized = host.split(':')[0];
-    }
-    // else: bare IPv6, keep as-is
+  const parsed = _parseHostAndPort(host);
+  if (!parsed.isValid) {
+    // Return as-is (will be lowercased) if it's invalid bracket syntax
+    return typeof host === 'string' ? host.toLowerCase() : '';
   }
-
-  return normalized.toLowerCase();
+  return parsed.hostPart.toLowerCase();
 }
 
 /**
  * Check if a Host header value refers to the Bansos public host.
  * Returns true for: api.priaoslo.web.id (case-insensitive, optional :443)
- * Returns false for: any other host, non-standard ports, IPv6 literals
- * @param {string} host - The Host header value
+ * Returns false for: any other host, non-standard ports, IPv6 literals, non-string input
+ * @param {*} host - The Host header value
  * @returns {boolean} True if this is the Bansos host
  */
 export function isBansosHost(host) {
-  const normalized = normalizeHost(host);
+  // Guard against non-string input
+  if (typeof host !== 'string') {
+    return false;
+  }
 
+  const parsed = _parseHostAndPort(host);
+
+  // Reject invalid bracket syntax (e.g., [hostname]:port)
+  if (!parsed.isValid) {
+    return false;
+  }
+
+  // Reject bare IPv6 addresses (they don't match the bansos host)
+  if (parsed.isIPLiteral) {
+    return false;
+  }
+
+  // Check if normalized host matches BANSOS_HOST
+  const normalized = parsed.hostPart.toLowerCase();
   if (normalized !== BANSOS_HOST) {
     return false;
   }
 
-  // If the original host contains a port, verify it's allowed (:443 is standard HTTPS)
-  let hasNonStandardPort = false;
-
-  if (host.startsWith('[')) {
-    // IPv6 with brackets: [host]:port
-    const endBracket = host.indexOf(']');
-    if (endBracket !== -1 && host.length > endBracket + 1) {
-      const afterBracket = host.substring(endBracket + 1);
-      if (afterBracket.startsWith(':') && afterBracket !== ':443') {
-        hasNonStandardPort = true;
-      }
-    }
-  } else {
-    // Regular host (possibly with port)
-    // Count colons: if > 1, it's bare IPv6 (not allowed for bansos host match)
-    const colonCount = (host.match(/:/g) || []).length;
-    if (colonCount === 1) {
-      // One colon means host:port
-      const port = host.split(':')[1];
-      if (port !== '443') {
-        hasNonStandardPort = true;
-      }
-    } else if (colonCount > 1) {
-      // Multiple colons mean bare IPv6 - can't be the bansos host
-      return false;
-    }
+  // If there's a port, it must be :443 (standard HTTPS) or absent
+  if (parsed.port !== null && parsed.port !== '443') {
+    return false;
   }
 
-  return !hasNonStandardPort;
+  return true;
 }
 
 /**
  * Check if a method+path pair is allowlisted for Bansos requests.
  * Allows both pre-rewrite (/v1/*) and post-rewrite (/api/v1/*) forms.
- * @param {string} method - HTTP method (GET, POST, etc.)
- * @param {string} path - Request path
+ * @param {*} method - HTTP method (GET, POST, etc.)
+ * @param {*} path - Request path
  * @returns {boolean} True if this endpoint is allowed
  */
 export function isAllowedBansosEndpoint(method, path) {
+  // Guard against non-string input
+  if (typeof method !== 'string' || typeof path !== 'string') {
+    return false;
+  }
+
   // Only GET and POST are allowed
   if (method !== 'GET' && method !== 'POST') {
     return false;

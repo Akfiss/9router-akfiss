@@ -28,6 +28,18 @@ describe('bansos-policy', () => {
       expect(BANSOS_LIMITS.maxPromptSize).toBe(64 * 1024); // 64 KiB
       expect(BANSOS_LIMITS.promptRetentionDays).toBe(7);
     });
+
+    it('should make BANSOS_LIMITS immutable', () => {
+      // Attempting to modify the object should fail (either throw in strict mode or silently fail)
+      const originalValue = BANSOS_LIMITS.maxRequestBody;
+      try {
+        BANSOS_LIMITS.maxRequestBody = 999;
+      } catch {
+        // In strict mode, assignment to frozen object throws (expected)
+      }
+      // Value must remain unchanged regardless of whether assignment threw or not
+      expect(BANSOS_LIMITS.maxRequestBody).toBe(originalValue);
+    });
   });
 
   describe('normalizeHost', () => {
@@ -58,6 +70,13 @@ describe('bansos-policy', () => {
     it('should handle regular IPv4', () => {
       expect(normalizeHost('192.168.1.1')).toBe('192.168.1.1');
       expect(normalizeHost('192.168.1.1:8080')).toBe('192.168.1.1');
+    });
+
+    it('should reject bracket-wrapped non-IP hostnames (security safeguard)', () => {
+      // Bracket syntax is only valid for IP literals (IPv4/IPv6).
+      // A bracketed non-IP hostname like [api.priaoslo.web.id] should not be treated as an IPv6 address.
+      // The normalizeHost function should only strip brackets if the contents are an IP literal.
+      expect(normalizeHost('[api.priaoslo.web.id]')).not.toBe('api.priaoslo.web.id');
     });
   });
 
@@ -97,6 +116,20 @@ describe('bansos-policy', () => {
       // and does not look at X-Forwarded-Host. The function signature does not
       // take X-Forwarded-Host as a parameter, so this is guaranteed.
       expect(isBansosHost('some-other-host')).toBe(false);
+    });
+
+    it('should return false for bracket-wrapped non-IP hostnames', () => {
+      // Brackets are only valid for IP literals. A bracketed non-IP hostname
+      // should not match the Bansos host, no matter the hostname inside.
+      expect(isBansosHost('[api.priaoslo.web.id]')).toBe(false);
+      expect(isBansosHost('[api.priaoslo.web.id]:443')).toBe(false);
+    });
+
+    it('should return false for non-string input', () => {
+      expect(isBansosHost(undefined)).toBe(false);
+      expect(isBansosHost(null)).toBe(false);
+      expect(isBansosHost(123)).toBe(false);
+      expect(isBansosHost({})).toBe(false);
     });
   });
 
@@ -161,6 +194,17 @@ describe('bansos-policy', () => {
       it('should return false for lowercase method names', () => {
         expect(isAllowedBansosEndpoint('get', '/v1/models')).toBe(false);
         expect(isAllowedBansosEndpoint('post', '/v1/chat/completions')).toBe(false);
+      });
+    });
+
+    describe('non-string input safety', () => {
+      it('should return false for non-string path or method (avoid throwing)', () => {
+        expect(isAllowedBansosEndpoint('GET', null)).toBe(false);
+        expect(isAllowedBansosEndpoint('GET', undefined)).toBe(false);
+        expect(isAllowedBansosEndpoint('GET', 123)).toBe(false);
+        expect(isAllowedBansosEndpoint(null, '/v1/models')).toBe(false);
+        expect(isAllowedBansosEndpoint(undefined, '/v1/models')).toBe(false);
+        expect(isAllowedBansosEndpoint(123, '/v1/models')).toBe(false);
       });
     });
   });

@@ -8,9 +8,9 @@ export const PUBLIC_MODEL = 'bansos/grok-4.5';
 export const INTERNAL_MODEL = 'gcli/grok-4.5';
 
 /**
- * Bansos Gateway limits and constraints
+ * Bansos Gateway limits and constraints (immutable)
  */
-export const BANSOS_LIMITS = {
+export const BANSOS_LIMITS = Object.freeze({
   // Maximum request body size: 2 MiB
   maxRequestBody: 2 * 1024 * 1024,
 
@@ -25,4 +25,4 @@ export const BANSOS_LIMITS = {
 
   // Prompt retention period: 7 days
   promptRetentionDays: 7,
-};
+});
