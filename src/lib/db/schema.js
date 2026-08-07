@@ -3,7 +3,7 @@
 // pre-change safety backup in migrate.js: when the stored version is lower,
 // one lightweight DB backup is taken before applying schema changes. Forgetting
 // to bump only skips that backup — it does NOT break the additive auto-sync.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const PRAGMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -150,6 +150,77 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_rd_provider ON requestDetails(provider)",
       "CREATE INDEX IF NOT EXISTS idx_rd_model ON requestDetails(model)",
       "CREATE INDEX IF NOT EXISTS idx_rd_conn ON requestDetails(connectionId)",
+    ],
+  },
+
+  // ── Bansos Gateway (public API gateway) ───────────────────────────────
+  // Added in SCHEMA_VERSION 2. No FOREIGN KEY clauses by design (see
+  // open-sse/AGENTS.md-style convention followed elsewhere in this file) —
+  // ownership/deletion/revocation invariants are enforced in
+  // src/lib/db/repos/bansosRepo.js transactions instead, so every SQLite
+  // adapter (bun:sqlite / better-sqlite3 / node:sqlite / sql.js) behaves
+  // identically regardless of FK pragma support.
+  bansosUsers: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      name: "TEXT NOT NULL",
+      requestsPerMinute: "INTEGER NOT NULL DEFAULT 10",
+      maxConcurrentRequests: "INTEGER NOT NULL DEFAULT 2",
+      isActive: "INTEGER NOT NULL DEFAULT 1",
+      createdAt: "TEXT NOT NULL",
+      updatedAt: "TEXT NOT NULL",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_bu_active ON bansosUsers(isActive)",
+    ],
+  },
+  bansosApiKeys: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      userId: "TEXT NOT NULL",
+      name: "TEXT NOT NULL",
+      keyHash: "TEXT UNIQUE NOT NULL",
+      keyPrefix: "TEXT NOT NULL",
+      isActive: "INTEGER NOT NULL DEFAULT 1",
+      lastUsedAt: "TEXT",
+      createdAt: "TEXT NOT NULL",
+      revokedAt: "TEXT",
+    },
+    indexes: [
+      // keyHash already carries an implicit unique index from the column
+      // constraint; this named index keeps the lookup-by-hash query plan
+      // explicit and stable across adapters.
+      "CREATE INDEX IF NOT EXISTS idx_bak_keyhash ON bansosApiKeys(keyHash)",
+      "CREATE INDEX IF NOT EXISTS idx_bak_user ON bansosApiKeys(userId)",
+      "CREATE INDEX IF NOT EXISTS idx_bak_user_active ON bansosApiKeys(userId, isActive)",
+    ],
+  },
+  bansosPromptAudit: {
+    columns: {
+      requestId: "TEXT PRIMARY KEY",
+      userId: "TEXT NOT NULL",
+      apiKeyId: "TEXT NOT NULL",
+      createdAt: "TEXT NOT NULL",
+      completedAt: "TEXT",
+      expiresAt: "TEXT NOT NULL",
+      publicModel: "TEXT NOT NULL",
+      internalModel: "TEXT NOT NULL",
+      stream: "INTEGER NOT NULL DEFAULT 0",
+      status: "TEXT NOT NULL",
+      httpStatus: "INTEGER",
+      errorCategory: "TEXT",
+      prompt: "TEXT",
+      promptTruncated: "INTEGER NOT NULL DEFAULT 0",
+      tokens: "TEXT",
+      durationMs: "INTEGER",
+      ttftMs: "INTEGER",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_bpa_user ON bansosPromptAudit(userId)",
+      "CREATE INDEX IF NOT EXISTS idx_bpa_apikey ON bansosPromptAudit(apiKeyId)",
+      "CREATE INDEX IF NOT EXISTS idx_bpa_created ON bansosPromptAudit(createdAt DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_bpa_expires ON bansosPromptAudit(expiresAt)",
+      "CREATE INDEX IF NOT EXISTS idx_bpa_status ON bansosPromptAudit(status)",
     ],
   },
 };
