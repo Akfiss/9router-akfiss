@@ -7,6 +7,7 @@ import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine, buildBansosUsageMeta } from "./requestDetail.js";
+import { finalizeBansosPromptAudit } from "@/lib/bansos/promptAudit.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
@@ -407,6 +408,13 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   // leaves the lease for Task 8's fallback loop (or chat.js's outer
   // catch-all on a thrown exception) to own.
   if (bansosContext) bansosContext.release();
+  // Task 10: finalize the prompt-audit row at this same terminal-success
+  // point, right alongside the release() call above — see the note above
+  // it for why the two BAD_GATEWAY returns earlier in this function are
+  // NOT paired with a finalize call (they can still trigger chat.js's
+  // account-fallback retry under the same lease/request, so the audit row
+  // must stay "pending" until a truly terminal outcome is reached).
+  finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200, tokens: usage, durationMs: totalLatency });
 
   return {
     success: true,

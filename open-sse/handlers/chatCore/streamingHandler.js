@@ -7,6 +7,7 @@ import { STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamHelpers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine, buildBansosUsageMeta } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
+import { finalizeBansosPromptAudit } from "@/lib/bansos/promptAudit.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
 
 // Codex returns Responses API SSE → which client format to translate INTO, by request sourceFormat.
@@ -111,6 +112,12 @@ export function wrapStreamControllerForBansos(streamController, bansosContext, {
       label: "STREAM USAGE",
       silent: true,
     });
+    // Task 10: finalize the prompt-audit row alongside the usageHistory
+    // write above — this helper already runs under the `finalized` guard
+    // (called only once, from whichever of handleError/handleDisconnect/the
+    // completionState-missing fallback in handleComplete fires first), so
+    // this is naturally exactly-once per request with no new guard needed.
+    finalizeBansosPromptAudit(bansosContext, { status: "interrupted" });
   };
 
   const finalizeInterrupted = () => {
@@ -278,6 +285,13 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     // Bansos) since it's harmless for ordinary requests and keeps this one
     // flag meaning one thing: "saveUsageStats above was reached."
     completionState.completed = true;
+    // Task 10: finalize the prompt-audit row at this same success point —
+    // guarded by the same completionState/finalized machinery Task 9 built
+    // (this only runs once per request on the real success path; a later
+    // handleComplete/handleError/handleDisconnect in
+    // wrapStreamControllerForBansos sees completionState.completed:true and
+    // skips writing its own interrupted row).
+    finalizeBansosPromptAudit(bansosContext, { status: "success", tokens: usage, durationMs: latency.total, ttftMs: latency.ttft });
     if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency }));
 
     // Success completion point for a Bansos lease. This fires from the

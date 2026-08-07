@@ -158,12 +158,27 @@ const mocks = vi.hoisted(() => ({
   saveRequestUsage: vi.fn(async () => {}),
   saveRequestDetail: vi.fn(async () => {}),
   appendRequestLog: vi.fn(async () => {}),
+  startBansosPromptAudit: vi.fn(),
+  finalizeBansosPromptAudit: vi.fn(),
 }));
 
 vi.mock("@/lib/usageDb.js", () => ({
   saveRequestUsage: mocks.saveRequestUsage,
   saveRequestDetail: mocks.saveRequestDetail,
   appendRequestLog: mocks.appendRequestLog,
+}));
+
+// Task 10: nonStreamingHandler.js/sseToJsonHandler.js/streamingHandler.js now
+// call finalizeBansosPromptAudit at the same completion points this block
+// already exercises with a real-shaped (non-null) bansosContext. Mocked here
+// for the same hermeticity reason @/lib/usageDb.js is mocked above: without
+// this, the real promptAudit.js -> bansosRepo.js would call the real
+// getAdapter() against a real SQLite DB on every test in this block (fail-open,
+// so it wouldn't fail an assertion, but it would silently touch real
+// persistence on the test machine).
+vi.mock("@/lib/bansos/promptAudit.js", () => ({
+  startBansosPromptAudit: mocks.startBansosPromptAudit,
+  finalizeBansosPromptAudit: mocks.finalizeBansosPromptAudit,
 }));
 
 // Hoisted so Block G ("handleStreamingResponse — controller wrapping wiring")

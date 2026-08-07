@@ -39,6 +39,8 @@ const mocks = vi.hoisted(() => ({
   getProjectIdForConnection: vi.fn(async () => null),
   acquireBansosChat: vi.fn(),
   getBansosUserById: vi.fn(),
+  startBansosPromptAudit: vi.fn(),
+  finalizeBansosPromptAudit: vi.fn(),
 }));
 
 vi.mock("@/sse/services/auth.js", () => ({
@@ -93,6 +95,21 @@ vi.mock("@/lib/bansos/rateLimiter.js", () => ({
 
 vi.mock("@/lib/db/index.js", () => ({
   getBansosUserById: mocks.getBansosUserById,
+}));
+
+// Task 10: chat.js now calls startBansosPromptAudit/finalizeBansosPromptAudit
+// for real from resolveBansosChatRequest/dispatchSingleModelChat. Mocked here
+// (matching this file's existing convention of mocking every direct
+// dependency of chat.js) so this unit test never touches the real DB adapter
+// via promptAudit.js -> @/lib/db/repos/bansosRepo.js's insertBansosPromptAudit/
+// finalizeBansosPromptAudit (which call the real getAdapter()). Both
+// functions are fail-open/fire-and-forget in the real module, so leaving
+// this unmocked would not break assertions — but it would silently open/
+// write to a real SQLite DB (DATA_DIR, or ~/.9router by default) on every
+// test run, which this file otherwise carefully avoids.
+vi.mock("@/lib/bansos/promptAudit.js", () => ({
+  startBansosPromptAudit: mocks.startBansosPromptAudit,
+  finalizeBansosPromptAudit: mocks.finalizeBansosPromptAudit,
 }));
 
 const { handleChat } = await import("../../src/sse/handlers/chat.js");

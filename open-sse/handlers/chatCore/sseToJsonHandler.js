@@ -4,6 +4,7 @@ import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine, buildBansosUsageMeta } from "./requestDetail.js";
+import { finalizeBansosPromptAudit } from "@/lib/bansos/promptAudit.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
@@ -237,6 +238,11 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         // Chat Completions success return below for why release() is
         // scoped to success returns only, not a blanket finally.
         if (bansosContext) bansosContext.release();
+        // Task 10: finalize the prompt-audit row alongside release() — this
+        // handler (grok-cli's forceStream:true routes here for any Bansos
+        // client sending stream:false; see chatCore.js's
+        // !clientRequestedStreaming && providerRequiresStreaming branch).
+        finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200, tokens: usage, durationMs: totalLatency });
         return { success: true, response: new Response(JSON.stringify(jsonResponse), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
       }
 
@@ -294,6 +300,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       }
 
       if (bansosContext) bansosContext.release();
+      finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200, tokens: usage, durationMs: totalLatency });
       return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
       // Not a release point: an exception here (e.g. malformed upstream
@@ -387,6 +394,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       : parsed;
 
     if (bansosContext) bansosContext.release();
+    finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200, tokens: usage, durationMs: totalLatency });
     return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
     // Not a release point — see the note above the try block: this path's

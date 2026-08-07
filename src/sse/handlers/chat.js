@@ -27,6 +27,7 @@ import { isBansosHost, validateBansosModel, bansosError } from "@/lib/bansos/pol
 import { PUBLIC_MODEL as BANSOS_PUBLIC_MODEL, INTERNAL_MODEL as BANSOS_INTERNAL_MODEL, BANSOS_LIMITS } from "@/lib/bansos/constants.js";
 import { acquireBansosChat } from "@/lib/bansos/rateLimiter.js";
 import { getBansosUserById } from "@/lib/db/index.js";
+import { startBansosPromptAudit, finalizeBansosPromptAudit } from "@/lib/bansos/promptAudit.js";
 
 const BANSOS_USER_ID_HEADER = "x-9r-bansos-user-id";
 const BANSOS_KEY_ID_HEADER = "x-9r-bansos-key-id";
@@ -166,18 +167,27 @@ async function resolveBansosChatRequest(request, body, settings) {
   // open-sse/executors/antigravity.js).
   const internalBody = { ...structuredClone(body), model: BANSOS_INTERNAL_MODEL };
 
-  return {
-    body: internalBody,
-    context: {
-      userId: user.id,
-      apiKeyId,
-      requestId: crypto.randomUUID(),
-      publicModel: BANSOS_PUBLIC_MODEL,
-      internalModel: BANSOS_INTERNAL_MODEL,
-      release: lease.release,
-      startedAt: Date.now(),
-    },
+  const context = {
+    userId: user.id,
+    apiKeyId,
+    requestId: crypto.randomUUID(),
+    publicModel: BANSOS_PUBLIC_MODEL,
+    internalModel: BANSOS_INTERNAL_MODEL,
+    release: lease.release,
+    startedAt: Date.now(),
   };
+
+  // Task 10: start the seven-day prompt-audit row now that the policy gate
+  // has fully accepted this request — every earlier `return { error }` above
+  // (missing identity, disabled user, kill switch, body/prompt too large,
+  // invalid model, rate-limit rejection) never reaches here, so none of
+  // those rejections get an audit row (nothing to audit — they never reach
+  // a provider). Pass the ORIGINAL, pre-rewrite `body` (public model name +
+  // untouched messages), NOT `internalBody`. Fire-and-forget, fail-open —
+  // never throws, never delays this return.
+  startBansosPromptAudit(context, body);
+
+  return { body: internalBody, context };
 }
 
 /**
@@ -271,6 +281,17 @@ export async function handleChat(request, clientRawRequest = null) {
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
   if (bypassResponse) {
     releaseBansosLease(bansosContext);
+    // Terminal for the prompt-audit row too: a bypass short-circuit never
+    // reaches a provider, and its synthesized response carries an implicit
+    // 200 (see open-sse/utils/bypassHandler.js's createStreamingResponse/
+    // createNonStreamingResponse — neither sets an explicit status). Without
+    // this, a Bansos request whose (client-controlled) User-Agent/content
+    // trips the bypass check would leave its audit row stuck at "pending"
+    // forever — this call site was NOT in Task 10's original enumerated
+    // list of releaseBansosLease() sites (that list covered dispatchSingleModelChat
+    // + handleSingleModelChat only), found instead by grepping this whole
+    // file for every releaseBansosLease( call.
+    finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200 });
     return bypassResponse.response || bypassResponse;
   }
 
@@ -362,6 +383,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     return await dispatchSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext);
   } catch (err) {
     releaseBansosLease(bansosContext);
+    // Unhandled exception surfaces uncaught out of handleChat — Next.js's
+    // route-handler wrapper turns that into a bare 500 (no route in this
+    // codebase wraps handleChat in its own try/catch; see route.js files
+    // under src/app/api/v1*/), so 500 is the accurate httpStatus here.
+    finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: 500, errorCategory: "dispatch_exception" });
     throw err;
   }
 }
@@ -419,6 +445,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
     releaseBansosLease(bansosContext);
+    finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: HTTP_STATUS.BAD_REQUEST, errorCategory: "invalid_model_format" });
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
   }
 
@@ -444,15 +471,18 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
         releaseBansosLease(bansosContext);
+        finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: status, errorCategory: "accounts_rate_limited" });
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
         releaseBansosLease(bansosContext);
+        finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: HTTP_STATUS.NOT_FOUND, errorCategory: "no_credentials" });
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
       releaseBansosLease(bansosContext);
+      finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, errorCategory: "no_more_accounts" });
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
     }
 
@@ -531,6 +561,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
     // No further fallback: this was a pre-response failure from this
     // client's point of view (no handler ever took ownership) — release now.
     releaseBansosLease(bansosContext);
+    finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: result.status, errorCategory: "fallback_exhausted" });
     return result.response;
   }
 }
