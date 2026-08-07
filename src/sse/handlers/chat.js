@@ -31,6 +31,18 @@ import { getBansosUserById } from "@/lib/db/index.js";
 const BANSOS_USER_ID_HEADER = "x-9r-bansos-user-id";
 const BANSOS_KEY_ID_HEADER = "x-9r-bansos-key-id";
 
+// Releases a Bansos rate-limiter lease exactly once, swallowing any error
+// from release() itself so it can never mask the real error/response being
+// returned. No-op when ctx is null/undefined (every ordinary, non-Bansos
+// request). Call this at EVERY exit point — from handleChat itself or from
+// dispatchSingleModelChat — that bails out before a streaming/non-streaming
+// handler has taken ownership of the response (Task 9 owns release from
+// that point on).
+function releaseBansosLease(ctx) {
+  if (!ctx) return;
+  try { ctx.release(); } catch { /* never mask the real error */ }
+}
+
 // Converts a policy.bansosError() result (a plain {status, body, headers}
 // object, not a Response) into a real Web Response. chat.js is not Next.js
 // middleware — there's no NextResponse here — so this mirrors
@@ -137,8 +149,25 @@ async function resolveBansosChatRequest(request, body, settings) {
     return { error: bansosErrorResponse(bansosError(429, message, "rate_limit_error", lease.reason, extraHeaders)) };
   }
 
+  // Deep-clone, not shallow: a shallow `{ ...body, model }` still shares
+  // `body.messages` (and every message/tool_call object inside it) by
+  // reference with `clientRawRequest.body`, which Task 10's prompt-audit
+  // feature relies on staying pristine. Ordinary dispatch mutates messages
+  // in place further downstream on every request — e.g.
+  // open-sse/translator/index.js's translateRequest() starts from
+  // `let result = body` (no clone) and its normalizeThinkingConfig()/
+  // ensureToolCallIds() helpers mutate fields on those same message/
+  // tool_call objects in place, and RTK's compressMessages() mutates
+  // message content in place when rtkEnabled — so without a deep clone
+  // here, the very first ordinary translation pass would silently corrupt
+  // the "preserved original" Task 10 expects to read from
+  // clientRawRequest.body later. structuredClone is already an established
+  // convention in this codebase (see open-sse/executors/kiro.js,
+  // open-sse/executors/antigravity.js).
+  const internalBody = { ...structuredClone(body), model: BANSOS_INTERNAL_MODEL };
+
   return {
-    body: { ...body, model: BANSOS_INTERNAL_MODEL },
+    body: internalBody,
     context: {
       userId: user.id,
       apiKeyId,
@@ -240,7 +269,10 @@ export async function handleChat(request, clientRawRequest = null) {
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
-  if (bypassResponse) return bypassResponse.response || bypassResponse;
+  if (bypassResponse) {
+    releaseBansosLease(bansosContext);
+    return bypassResponse.response || bypassResponse;
+  }
 
   const requiredCapabilities = detectRequiredCapabilities(body);
 
@@ -329,9 +361,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   try {
     return await dispatchSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext);
   } catch (err) {
-    if (bansosContext) {
-      try { bansosContext.release(); } catch { /* never let a release bug mask the original error */ }
-    }
+    releaseBansosLease(bansosContext);
     throw err;
   }
 }
@@ -388,7 +418,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
-    if (bansosContext) { try { bansosContext.release(); } catch { /* never mask the real error */ } }
+    releaseBansosLease(bansosContext);
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
   }
 
@@ -413,16 +443,16 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        if (bansosContext) { try { bansosContext.release(); } catch { /* never mask the real error */ } }
+        releaseBansosLease(bansosContext);
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
-        if (bansosContext) { try { bansosContext.release(); } catch { /* never mask the real error */ } }
+        releaseBansosLease(bansosContext);
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
-      if (bansosContext) { try { bansosContext.release(); } catch { /* never mask the real error */ } }
+      releaseBansosLease(bansosContext);
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
     }
 
@@ -500,7 +530,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
 
     // No further fallback: this was a pre-response failure from this
     // client's point of view (no handler ever took ownership) — release now.
-    if (bansosContext) { try { bansosContext.release(); } catch { /* never mask the real error */ } }
+    releaseBansosLease(bansosContext);
     return result.response;
   }
 }

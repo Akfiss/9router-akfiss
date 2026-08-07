@@ -384,6 +384,30 @@ describe("Bansos chat policy — success path rewrites model and attaches bansos
     expect(call.clientRawRequest.body.model).toBe(PUBLIC_MODEL);
   });
 
+  it("deep-clones the dispatched body so downstream in-place mutation of messages never corrupts the original client body (Task 10's prompt-audit trail)", async () => {
+    const releaseFn = vi.fn();
+    mocks.acquireBansosChat.mockReturnValue({ ok: true, release: releaseFn });
+    const originalBody = { model: PUBLIC_MODEL, messages: [{ role: "user", content: "hi" }] };
+    const req = makeRequest({ host: BANSOS_HOST, headers: bansosHeaders(), body: originalBody });
+
+    await handleChat(req);
+
+    const call = mocks.handleChatCore.mock.calls[0][0];
+    // Not the same array/object references as the original — proves a real
+    // (structuredClone) deep clone, not a shallow `{...body}` that still
+    // shares the nested `messages` objects by reference.
+    expect(call.body.messages).not.toBe(originalBody.messages);
+    expect(call.body.messages[0]).not.toBe(originalBody.messages[0]);
+
+    // Simulate the in-place mutation ordinary dispatch performs further
+    // downstream (translateRequest's normalizeThinkingConfig/ensureToolCallIds,
+    // RTK's compressMessages all mutate message objects in place).
+    call.body.messages[0].content = "mutated-downstream";
+
+    expect(originalBody.messages[0].content).toBe("hi");
+    expect(call.clientRawRequest.body.messages[0].content).toBe("hi");
+  });
+
   it("threads the same bansosContext through the capacity-adapter multi-model path", async () => {
     const releaseFn = vi.fn();
     mocks.acquireBansosChat.mockReturnValue({ ok: true, release: releaseFn });
@@ -451,6 +475,24 @@ describe("Bansos chat policy — lease release on pre-response failure (Task 8 s
     await handleChat(req);
 
     expect(releaseFn).not.toHaveBeenCalled();
+  });
+
+  it("releases the lease when a bypass response short-circuits before any dispatch (prevents self-lockout via forged bypass signals)", async () => {
+    const releaseFn = vi.fn();
+    mocks.acquireBansosChat.mockReturnValue({ ok: true, release: releaseFn });
+    // A malicious Bansos client can freely forge User-Agent / message content —
+    // the exact signals handleBypassRequest keys off. If the early return this
+    // triggers in handleChat skipped the release, a client could self-lock out
+    // of the gateway for up to maxStreamDurationMs by leaking concurrency leases.
+    mocks.handleBypassRequest.mockReturnValueOnce({ response: new Response("bypass-ok") });
+
+    const req = makeRequest({ host: BANSOS_HOST, headers: bansosHeaders() });
+    const response = await handleChat(req);
+
+    expect(await response.text()).toBe("bypass-ok");
+    expect(mocks.getModelInfo).not.toHaveBeenCalled();
+    expect(mocks.handleChatCore).not.toHaveBeenCalled();
+    expect(releaseFn).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the lease held across an internal account-fallback retry (still one client-facing request)", async () => {
