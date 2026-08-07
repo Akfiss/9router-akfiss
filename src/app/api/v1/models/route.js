@@ -7,6 +7,8 @@ import {
 } from "@/shared/constants/providers";
 import { getProviderConnections, getCombos, getCustomModels, getModelAliases } from "@/lib/localDb";
 import { getDisabledModels } from "@/lib/disabledModelsDb";
+import { isBansosHost } from "@/lib/bansos/policy.js";
+import { PUBLIC_MODEL } from "@/lib/bansos/constants.js";
 import { resolveKiroModels } from "open-sse/services/kiroModels.js";
 import { resolveKimchiModels } from "open-sse/services/kimchiModels.js";
 import { resolveQoderModels } from "open-sse/services/qoderModels.js";
@@ -538,6 +540,17 @@ export async function OPTIONS() {
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
  */
 export async function GET(request) {
+  // Return the one-model Bansos catalog immediately for the public host,
+  // bypassing the expensive provider/combo/live-model machinery
+  if (isBansosHost(request.headers.get("host"))) {
+    return Response.json({
+      object: "list",
+      data: [{ id: PUBLIC_MODEL, object: "model", owned_by: "bansos" }],
+    }, {
+      headers: { "Access-Control-Allow-Origin": "*" },
+    });
+  }
+
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
