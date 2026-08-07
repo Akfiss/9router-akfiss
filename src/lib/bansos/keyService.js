@@ -16,7 +16,7 @@ import {
   getBansosKeyByHash,
   getBansosUserById,
   listBansosKeysByUser,
-  revokeBansosKey,
+  rotateBansosKeyRecord,
   touchBansosKeyLastUsed,
 } from "@/lib/db/index.js";
 
@@ -117,21 +117,51 @@ export async function verifyBansosKey(plaintext) {
 }
 
 /**
- * Rotate a key: create the replacement first, then revoke the original —
- * so a failure between the two steps leaves the user with an extra valid
- * key rather than none. Requires the caller to assert `userId` ownership
- * (mirrors revokeBansosKey's ownership-scoped contract); throws if the key
- * doesn't exist or isn't owned by that user, and if `name` is omitted the
- * new key reuses the original's name.
+ * Rotate a key. Takes a single options object — deliberately not
+ * `(keyId, userId, name)` positionally: `keyId` and `userId` are both bare
+ * strings/ids, so a caller that transposes them (e.g. passing a new display
+ * name where `userId` belongs) would otherwise fail ownership lookup
+ * silently and surface a misleading "not found" error instead of an
+ * obvious argument-order bug. The object form makes the 3-required-params
+ * contract self-documenting, mirroring `createBansosKey({ userId, name })`
+ * in this same file.
+ *
+ * Crypto/business logic (generate + hash + display prefix, and defaulting
+ * `name` to the original's when omitted) stays here in the service layer.
+ * Persistence is delegated whole to `rotateBansosKeyRecord`, which performs
+ * the INSERT (new key) and the ownership-scoped revoke UPDATE (old key)
+ * inside one `db.transaction()` — see bansosRepo.js — so a crash between
+ * "new key exists" and "old key revoked" can never happen; the two either
+ * both land or neither does.
+ *
+ * Requires the caller to assert `userId` ownership (mirrors
+ * `revokeBansosKey`'s ownership-scoped contract, and is necessary because
+ * Task 1 exposes no `getBansosKeyById`); throws if the key doesn't exist or
+ * isn't owned by that user.
  */
-export async function rotateBansosKey(keyId, userId, name) {
+export async function rotateBansosKey({ keyId, userId, name } = {}) {
   if (!keyId) throw new Error("keyId is required");
   if (!userId) throw new Error("userId is required");
 
   const original = await findOwnedKey(userId, keyId);
   if (!original) throw new Error("Bansos key not found for this user");
 
-  const created = await createBansosKey({ userId, name: name || original.name });
-  await revokeBansosKey(keyId, userId);
-  return created;
+  const newName = name || original.name;
+  const plaintext = generateBansosKey();
+  const keyHash = hashBansosKey(plaintext);
+  const keyPrefix = displayPrefix(plaintext);
+
+  const created = await rotateBansosKeyRecord({
+    userId,
+    oldKeyId: keyId,
+    newName,
+    newKeyHash: keyHash,
+    newKeyPrefix: keyPrefix,
+  });
+  // Defensive: findOwnedKey already confirmed ownership, but re-check in
+  // case the row was concurrently revoked/deleted between the two reads —
+  // rotateBansosKeyRecord's own atomic ownership check is the source of truth.
+  if (!created) throw new Error("Bansos key not found for this user");
+
+  return { ...created, plaintext, keyHash };
 }

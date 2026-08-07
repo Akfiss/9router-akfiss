@@ -237,6 +237,97 @@ describe("bansosRepo — API keys", () => {
     const missing = await db.touchBansosKeyLastUsed("nope");
     expect(missing).toBe(false);
   });
+
+  // rotateBansosKeyRecord (Task 2 fix-round addition): performs the new-key
+  // INSERT and the old-key revoke UPDATE inside a single db.transaction() so
+  // rotation is atomic at the repo layer — see bansosRepo.js for why (a
+  // reviewer-flagged gap in Task 2's first pass, where the service layer
+  // composed two independently-transacted repo calls instead).
+  describe("rotateBansosKeyRecord", () => {
+    it("creates the new key and revokes the old key atomically", async () => {
+      const db = await loadDb();
+      const owner = await db.createBansosUser({ name: "Rotator" });
+      const oldKey = await db.createBansosKeyRecord({
+        userId: owner.id, name: "old", keyHash: "rotate-old-hash", keyPrefix: "bansos_r1",
+      });
+
+      const newKey = await db.rotateBansosKeyRecord({
+        userId: owner.id, oldKeyId: oldKey.id,
+        newName: "new", newKeyHash: "rotate-new-hash", newKeyPrefix: "bansos_r2",
+      });
+      expect(newKey).toMatchObject({ userId: owner.id, name: "new", keyPrefix: "bansos_r2", isActive: true });
+      expect(newKey).not.toHaveProperty("keyHash");
+      expect(newKey.id).not.toBe(oldKey.id);
+
+      const { keys } = await db.listBansosKeysByUser(owner.id);
+      expect(keys).toHaveLength(2);
+      const oldRow = keys.find((k) => k.id === oldKey.id);
+      const newRow = keys.find((k) => k.id === newKey.id);
+      expect(oldRow.isActive).toBe(false);
+      expect(oldRow.revokedAt).toBeTruthy();
+      expect(newRow.isActive).toBe(true);
+      expect(newRow.revokedAt).toBeNull();
+    });
+
+    it("is a no-op — creates nothing and revokes nothing — when oldKeyId isn't owned by userId", async () => {
+      const db = await loadDb();
+      const owner = await db.createBansosUser({ name: "RealOwner" });
+      const stranger = await db.createBansosUser({ name: "Stranger" });
+      const oldKey = await db.createBansosKeyRecord({
+        userId: owner.id, name: "old", keyHash: "rotate-guard-hash", keyPrefix: "bansos_g1",
+      });
+
+      const result = await db.rotateBansosKeyRecord({
+        userId: stranger.id, oldKeyId: oldKey.id,
+        newName: "stolen", newKeyHash: "rotate-guard-new-hash", newKeyPrefix: "bansos_g2",
+      });
+      expect(result).toBeNull();
+
+      // Nothing changed: old key still active, no new key exists for either user.
+      const { keys: ownerKeys } = await db.listBansosKeysByUser(owner.id);
+      expect(ownerKeys).toHaveLength(1);
+      expect(ownerKeys[0].isActive).toBe(true);
+      expect(ownerKeys[0].revokedAt).toBeNull();
+      const { keys: strangerKeys } = await db.listBansosKeysByUser(stranger.id);
+      expect(strangerKeys).toHaveLength(0);
+      expect(await db.getBansosKeyByHash("rotate-guard-new-hash")).toBeNull();
+    });
+
+    it("is a no-op when oldKeyId does not exist", async () => {
+      const db = await loadDb();
+      const owner = await db.createBansosUser({ name: "NoKeys" });
+      const result = await db.rotateBansosKeyRecord({
+        userId: owner.id, oldKeyId: "does-not-exist",
+        newName: "new", newKeyHash: "rotate-missing-hash", newKeyPrefix: "bansos_m1",
+      });
+      expect(result).toBeNull();
+      expect(await db.getBansosKeyByHash("rotate-missing-hash")).toBeNull();
+    });
+
+    it("rotating an already-revoked key still creates the new one, without bumping the old revokedAt", async () => {
+      const db = await loadDb();
+      const owner = await db.createBansosUser({ name: "DoubleRotator" });
+      const oldKey = await db.createBansosKeyRecord({
+        userId: owner.id, name: "old", keyHash: "rotate-idem-hash", keyPrefix: "bansos_i1",
+      });
+      const firstRevoke = await db.revokeBansosKey(oldKey.id, owner.id);
+
+      const newKey = await db.rotateBansosKeyRecord({
+        userId: owner.id, oldKeyId: oldKey.id,
+        newName: "new", newKeyHash: "rotate-idem-new-hash", newKeyPrefix: "bansos_i2",
+      });
+      expect(newKey).toBeTruthy();
+
+      const { keys } = await db.listBansosKeysByUser(owner.id);
+      const oldRow = keys.find((k) => k.id === oldKey.id);
+      expect(oldRow.revokedAt).toBe(firstRevoke.revokedAt); // unchanged — not re-stamped
+    });
+
+    it("requires userId, oldKeyId, newName, newKeyHash, and newKeyPrefix", async () => {
+      const db = await loadDb();
+      await expect(db.rotateBansosKeyRecord({})).rejects.toThrow();
+    });
+  });
 });
 
 describe("bansosRepo — prompt audit", () => {

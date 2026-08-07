@@ -71,7 +71,7 @@ export {
 export {
   createBansosUser, listBansosUsers, getBansosUserById, updateBansosUser,
   createBansosKeyRecord, getBansosKeyByHash, listBansosKeysByUser,
-  revokeBansosKey, touchBansosKeyLastUsed,
+  revokeBansosKey, rotateBansosKeyRecord, touchBansosKeyLastUsed,
   insertBansosPromptAudit, finalizeBansosPromptAudit, listBansosPromptAudits,
   eraseBansosPrompt, clearExpiredBansosPrompts,
   getBansosUsageBreakdown,

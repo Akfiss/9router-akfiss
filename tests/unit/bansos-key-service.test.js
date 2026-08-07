@@ -258,7 +258,7 @@ describe("keyService — rotateBansosKey", () => {
     const user = await db.createBansosUser({ name: "Rotator" });
     const original = await createBansosKey({ userId: user.id, name: "Main key" });
 
-    const rotated = await rotateBansosKey(original.id, user.id, "Main key (rotated)");
+    const rotated = await rotateBansosKey({ keyId: original.id, userId: user.id, name: "Main key (rotated)" });
     expect(rotated.plaintext).toMatch(/^bns_[a-f0-9]{48}$/);
     expect(rotated.plaintext).not.toBe(original.plaintext);
     expect(rotated.userId).toBe(user.id);
@@ -287,7 +287,7 @@ describe("keyService — rotateBansosKey", () => {
     const user = await db.createBansosUser({ name: "NameReuser" });
     const original = await createBansosKey({ userId: user.id, name: "Keep my name" });
 
-    const rotated = await rotateBansosKey(original.id, user.id);
+    const rotated = await rotateBansosKey({ keyId: original.id, userId: user.id });
     expect(rotated.name).toBe("Keep my name");
   });
 
@@ -298,7 +298,7 @@ describe("keyService — rotateBansosKey", () => {
     const stranger = await db.createBansosUser({ name: "Stranger" });
     const original = await createBansosKey({ userId: owner.id, name: "Not yours" });
 
-    await expect(rotateBansosKey(original.id, stranger.id, "stolen")).rejects.toThrow();
+    await expect(rotateBansosKey({ keyId: original.id, userId: stranger.id, name: "stolen" })).rejects.toThrow();
 
     // Original key must remain untouched/active — rotation must not have run.
     const result = await verifyBansosKey(original.plaintext);
@@ -309,6 +309,6 @@ describe("keyService — rotateBansosKey", () => {
     const db = await loadDb();
     const { rotateBansosKey } = await loadKeyService();
     const user = await db.createBansosUser({ name: "NoKeys" });
-    await expect(rotateBansosKey("does-not-exist", user.id, "x")).rejects.toThrow();
+    await expect(rotateBansosKey({ keyId: "does-not-exist", userId: user.id, name: "x" })).rejects.toThrow();
   });
 });

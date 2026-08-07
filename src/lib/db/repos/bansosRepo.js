@@ -183,6 +183,47 @@ export async function revokeBansosKey(id, userId) {
   return result;
 }
 
+// Atomic rotation: INSERT the replacement, then (ownership-scoped, and only
+// if not already revoked) revoke the original — both inside one
+// db.transaction() so a crash mid-rotation can never leave the caller with
+// two live keys or, worse, zero. Mirrors revokeBansosKey's ownership check
+// (id + userId) and its idempotent "already revoked" no-op, and
+// createBansosKeyRecord's INSERT shape. Returns the new key's row (never
+// keyHash), or null if oldKeyId doesn't exist or isn't owned by userId — in
+// which case nothing is inserted or updated (the whole transaction is a
+// no-op via early return, so it naturally rolls back to nothing changed).
+export async function rotateBansosKeyRecord(data = {}) {
+  const { userId, oldKeyId, newName, newKeyHash, newKeyPrefix } = data;
+  if (!userId) throw new Error("userId is required");
+  if (!oldKeyId) throw new Error("oldKeyId is required");
+  if (!newName) throw new Error("newName is required");
+  if (!newKeyHash) throw new Error("newKeyHash is required");
+  if (!newKeyPrefix) throw new Error("newKeyPrefix is required");
+
+  const db = await getAdapter();
+  let result = null;
+  db.transaction(() => {
+    const oldRow = db.get(`SELECT ${KEY_COLUMNS} FROM bansosApiKeys WHERE id = ? AND userId = ?`, [oldKeyId, userId]);
+    if (!oldRow) return; // unknown id or not owned by userId — no-op
+
+    const newId = uuidv4();
+    const createdAt = new Date().toISOString();
+    db.run(
+      `INSERT INTO bansosApiKeys(id, userId, name, keyHash, keyPrefix, isActive, lastUsedAt, createdAt, revokedAt) VALUES(?, ?, ?, ?, ?, 1, NULL, ?, NULL)`,
+      [newId, userId, newName, newKeyHash, newKeyPrefix, createdAt]
+    );
+
+    if (!oldRow.revokedAt) {
+      const revokedAt = new Date().toISOString();
+      db.run(`UPDATE bansosApiKeys SET isActive = 0, revokedAt = ? WHERE id = ?`, [revokedAt, oldKeyId]);
+    }
+
+    const newRow = db.get(`SELECT ${KEY_COLUMNS} FROM bansosApiKeys WHERE id = ?`, [newId]);
+    result = rowToKey(newRow);
+  });
+  return result;
+}
+
 export async function touchBansosKeyLastUsed(id, whenIso) {
   const db = await getAdapter();
   const when = whenIso || new Date().toISOString();
