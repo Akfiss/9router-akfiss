@@ -48,10 +48,17 @@ function _parseHostAndPort(host) {
       hostPart = host;
       isIPLiteral = true;
     } else {
-      // host:port (single colon)
-      const parts = host.split(':');
-      hostPart = parts[0];
-      port = parts[1];
+      // Check for exactly one colon (host:port); reject multiple colons
+      const colonCount = (host.match(/:/g) || []).length;
+      if (colonCount === 1) {
+        // host:port (exactly one colon)
+        const parts = host.split(':');
+        hostPart = parts[0];
+        port = parts[1];
+      } else {
+        // Multiple colons without :: pattern (invalid/ambiguous)
+        return { hostPart: host, port: null, isIPLiteral: false, isValid: false };
+      }
     }
   }
 

@@ -131,6 +131,14 @@ describe('bansos-policy', () => {
       expect(isBansosHost(123)).toBe(false);
       expect(isBansosHost({})).toBe(false);
     });
+
+    it('should return false for malformed multi-colon Host values (reject ambiguous ports)', () => {
+      // Host values with multiple colons that don't represent bracketed IPv6 are invalid
+      // Examples: "host:port:extra", "host:port:port", etc.
+      expect(isBansosHost('api.priaoslo.web.id:443:evilstuff')).toBe(false);
+      expect(isBansosHost('api.priaoslo.web.id:443:443')).toBe(false);
+      expect(isBansosHost('localhost:3000:5000')).toBe(false);
+    });
   });
 
   describe('isAllowedBansosEndpoint', () => {
