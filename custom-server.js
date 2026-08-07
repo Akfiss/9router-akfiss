@@ -56,6 +56,7 @@ http.createServer = (...args) => {
     const ip = isLoopbackProxy && proxyIp ? proxyIp : socketIp;
     delete req.headers["x-9r-real-ip"];
     delete req.headers["x-forwarded-for"];
+    delete req.headers["x-forwarded-host"];
     delete req.headers["x-9r-via-proxy"];
     req.headers["x-9r-real-ip"] = ip;
     if (viaProxy) req.headers["x-9r-via-proxy"] = "1";
