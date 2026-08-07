@@ -18,7 +18,7 @@
 // top of the one from before the reload. See
 // src/shared/services/initializeApp.js's `global.__appSingleton` for the
 // same pattern.
-import { clearExpiredBansosPrompts } from "../db/index.js";
+import { clearExpiredBansosPrompts } from "@/lib/db/index.js";
 
 const HOURLY_MS = 60 * 60 * 1000;
 const INITIAL_DELAY_MS = 10 * 1000;
