@@ -4,12 +4,7 @@
 // turn into an empty-string filter downstream.
 import { NextResponse } from "next/server";
 import { listBansosPromptAudits } from "@/lib/db/index.js";
-
-function parseIntParam(value) {
-  if (value === null || value === undefined) return undefined;
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : undefined;
-}
+import { parseIntParam } from "@/lib/bansos/adminParams.js";
 
 // GET /api/bansos/requests?userId=&apiKeyId=&status=&page=&pageSize=
 export async function GET(request) {

@@ -5,12 +5,7 @@
 import { NextResponse } from "next/server";
 import { getBansosUserById, listBansosKeysByUser } from "@/lib/db/index.js";
 import { createBansosKey } from "@/lib/bansos/keyService.js";
-
-function parseIntParam(value) {
-  if (value === null || value === undefined) return undefined;
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : undefined;
-}
+import { parseIntParam } from "@/lib/bansos/adminParams.js";
 
 // GET /api/bansos/users/[id]/keys - list a user's keys (paginated)
 export async function GET(request, { params }) {

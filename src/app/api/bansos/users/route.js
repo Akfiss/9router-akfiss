@@ -3,23 +3,9 @@
 // /api/* auth). Pure composition over bansosRepo.js — no SQL/crypto here.
 import { NextResponse } from "next/server";
 import { createBansosUser, getSettings, listBansosUsers } from "@/lib/db/index.js";
+import { parseIntParam, validatePositiveInt } from "@/lib/bansos/adminParams.js";
 
 export const dynamic = "force-dynamic";
-
-function parseIntParam(value) {
-  if (value === null || value === undefined) return undefined;
-  const n = Number(value);
-  return Number.isFinite(n) ? Math.trunc(n) : undefined;
-}
-
-// >= 1 integer, or an explanatory error string.
-function validatePositiveInt(value, label) {
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < 1) {
-    return `${label} must be an integer >= 1`;
-  }
-  return null;
-}
 
 // GET /api/bansos/users - list Bansos gateway users (paginated)
 export async function GET(request) {

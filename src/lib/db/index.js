@@ -74,7 +74,7 @@ export {
   revokeBansosKey, rotateBansosKeyRecord, touchBansosKeyLastUsed,
   insertBansosPromptAudit, finalizeBansosPromptAudit, listBansosPromptAudits,
   eraseBansosPrompt, clearExpiredBansosPrompts,
-  getBansosUsageBreakdown,
+  getBansosUsageBreakdown, getBansosUsageTotalsAcrossUsers,
 } from "./repos/bansosRepo.js";
 
 // Export/import full DB

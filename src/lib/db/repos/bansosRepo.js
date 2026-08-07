@@ -426,3 +426,46 @@ export async function getBansosUsageBreakdown(userId, filter = {}) {
 
   return breakdown;
 }
+
+// Sums usage totals across ALL Bansos users in a single `usageHistory` table
+// scan. getBansosUsageBreakdown above is scoped to one userId — calling it
+// once per user to build a cross-user total (as the admin overview route
+// used to) means N full re-scans of the same rows. Every adapter this repo
+// ships (better-sqlite3, bun:sqlite, node:sqlite, sql.js) runs queries
+// synchronously on the main thread, so N scans block Node's single event
+// loop back-to-back, stalling every other in-flight request (including live
+// SSE streams) for that duration — not just an "admin roster size" concern.
+// This function does the equivalent work in exactly one scan by treating any
+// row with a truthy meta.bansosUserId (not one specific id) as in-scope.
+// Deliberately does NOT build byModel/byApiKey — callers that only need
+// summed totals (e.g. the overview card) shouldn't pay for a breakdown they
+// discard. Same JS-side meta filtering as getBansosUsageBreakdown, for the
+// same reason: sql.js (the pure-JS fallback adapter) has no JSON1 support,
+// so no json_extract here either.
+export async function getBansosUsageTotalsAcrossUsers(filter = {}) {
+  const db = await getAdapter();
+  const conds = [];
+  const params = [];
+  if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
+  if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+
+  const rows = db.all(
+    `SELECT promptTokens, completionTokens, cost, meta FROM usageHistory ${where}`,
+    params
+  );
+
+  const totals = { totalRequests: 0, totalPromptTokens: 0, totalCompletionTokens: 0, totalCost: 0 };
+
+  for (const row of rows) {
+    const meta = parseJson(row.meta, null);
+    if (!meta || !meta.bansosUserId) continue;
+
+    totals.totalRequests += 1;
+    totals.totalPromptTokens += row.promptTokens || 0;
+    totals.totalCompletionTokens += row.completionTokens || 0;
+    totals.totalCost += row.cost || 0;
+  }
+
+  return totals;
+}

@@ -2,22 +2,29 @@
 // limiter snapshot, today's attributed usage, Grok CLI connection presence,
 // and (only when explicitly requested) public-host reachability. Task 12.
 //
-// Global usage/key aggregation: bansosRepo.js exposes getBansosUsageBreakdown
-// scoped to a single userId (it throws without one) and no global
-// "all users" aggregate — see the repo file's own "Usage breakdown" comment
-// on why that aggregation stays in JS rather than SQL JSON1 (adapter
-// portability to sql.js). Rather than add a new repo primitive for a single
-// admin-only overview card, this route composes the existing per-user
-// functions: page through listBansosUsers and, for each user, sum
-// listBansosKeysByUser's pagination.totalItems (key count) and
-// getBansosUsageBreakdown's totals (today's usage). This keeps bansosRepo's
-// surface unchanged and matches this task's "composition, not new business
-// logic" brief. Acceptable at the expected scale of an admin-managed
-// Bansos user roster (tens, not millions); revisit with a real SQL
-// aggregate if that stops being true.
+// Global usage aggregation: today's usage total comes from ONE call to
+// bansosRepo.js's getBansosUsageTotalsAcrossUsers — a single-pass scan over
+// usageHistory that sums every row across ALL Bansos users at once. This
+// route used to sum getBansosUsageBreakdown(userId, {startDate}) once per
+// user instead; that function does its own full, unindexed `usageHistory`
+// scan per call (JS-side meta filtering, for sql.js-adapter portability —
+// see bansosRepo.js), and every DB adapter here runs synchronously, so N
+// per-user calls meant N blocking scans back-to-back on Node's single event
+// loop — stalling every other in-flight request (including live SSE
+// streams) for that duration on every load of this endpoint (which Task 13
+// polls from a live dashboard). getBansosUsageTotalsAcrossUsers only returns
+// the summed totalRequests/totalPromptTokens/totalCompletionTokens/
+// totalCost this card needs — no byModel/byApiKey breakdown, since this
+// route would discard that anyway.
+//
+// keyCount aggregation is unchanged: page through listBansosUsers and, for
+// each user, sum listBansosKeysByUser's pagination.totalItems. That's still
+// O(users) calls, but each is a normal indexed-ish per-user lookup
+// (`WHERE userId = ?`), not a full-table scan, so it doesn't have the same
+// blocking-scan problem the usage aggregation had.
 import { NextResponse } from "next/server";
 import {
-  getBansosUsageBreakdown,
+  getBansosUsageTotalsAcrossUsers,
   getProviderConnections,
   listBansosKeysByUser,
   listBansosPromptAudits,
@@ -40,12 +47,14 @@ function startOfTodayIso() {
   return d.toISOString();
 }
 
-// Pages through every Bansos user once, summing each one's key count and
-// today's usage breakdown. Composition-only — no SQL, no new repo surface.
+// Pages through every Bansos user once, summing each one's key count (a
+// per-user lookup, not a full-table scan — see file header). Today's usage
+// total is fetched separately, in one single-pass call to
+// getBansosUsageTotalsAcrossUsers — see file header for why that's no
+// longer summed per user inside this loop.
 async function aggregateAcrossUsers() {
   const startDate = startOfTodayIso();
   let keyCount = 0;
-  const todayUsage = { totalRequests: 0, totalPromptTokens: 0, totalCompletionTokens: 0, totalCost: 0 };
 
   let page = 1;
   for (;;) {
@@ -53,16 +62,12 @@ async function aggregateAcrossUsers() {
     for (const user of users) {
       const keysPage = await listBansosKeysByUser(user.id, { pageSize: 1 });
       keyCount += keysPage.pagination.totalItems;
-
-      const breakdown = await getBansosUsageBreakdown(user.id, { startDate });
-      todayUsage.totalRequests += breakdown.totalRequests;
-      todayUsage.totalPromptTokens += breakdown.totalPromptTokens;
-      todayUsage.totalCompletionTokens += breakdown.totalCompletionTokens;
-      todayUsage.totalCost += breakdown.totalCost;
     }
     if (!pagination.hasNext) break;
     page += 1;
   }
+
+  const todayUsage = await getBansosUsageTotalsAcrossUsers({ startDate });
 
   return { keyCount, todayUsage };
 }

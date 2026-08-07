@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
   revokeBansosKey: vi.fn(),
   listBansosPromptAudits: vi.fn(),
   eraseBansosPrompt: vi.fn(),
-  getBansosUsageBreakdown: vi.fn(),
+  getBansosUsageTotalsAcrossUsers: vi.fn(),
   getProviderConnections: vi.fn(),
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
@@ -35,7 +35,7 @@ vi.mock("@/lib/db/index.js", () => ({
   revokeBansosKey: mocks.revokeBansosKey,
   listBansosPromptAudits: mocks.listBansosPromptAudits,
   eraseBansosPrompt: mocks.eraseBansosPrompt,
-  getBansosUsageBreakdown: mocks.getBansosUsageBreakdown,
+  getBansosUsageTotalsAcrossUsers: mocks.getBansosUsageTotalsAcrossUsers,
   getProviderConnections: mocks.getProviderConnections,
   getSettings: mocks.getSettings,
   updateSettings: mocks.updateSettings,
@@ -475,9 +475,8 @@ describe("GET /api/bansos/overview", () => {
       audits: [],
       pagination: { page: 1, pageSize: 1, totalItems: 7, totalPages: 7, hasNext: true, hasPrev: false },
     });
-    mocks.getBansosUsageBreakdown.mockResolvedValue({
-      userId: "usr_1", totalRequests: 1, totalPromptTokens: 10, totalCompletionTokens: 20, totalCost: 0.01,
-      byModel: {}, byApiKey: {},
+    mocks.getBansosUsageTotalsAcrossUsers.mockResolvedValue({
+      totalRequests: 1, totalPromptTokens: 10, totalCompletionTokens: 20, totalCost: 0.01,
     });
     mocks.getProviderConnections.mockResolvedValue([{ id: "conn_1", provider: "grok-cli", isActive: true }]);
     mocks.getBansosLimiterSnapshot.mockReturnValue({ users: { usr_1: { activeLeases: 1, windowRequestCount: 3 } } });
@@ -495,10 +494,73 @@ describe("GET /api/bansos/overview", () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.userCount).toBe(2);
+    // setupOverviewMocks's aggregation-page fixture returns 2 users, each
+    // with listBansosKeysByUser reporting totalItems: 3 -> 2 * 3 = 6.
+    expect(body.keyCount).toBe(6);
     expect(body.requestCount).toBe(7);
+    expect(body.todayUsage).toEqual({
+      totalRequests: 1, totalPromptTokens: 10, totalCompletionTokens: 20, totalCost: 0.01,
+    });
     expect(body.limiterSnapshot.users.usr_1.activeLeases).toBe(1);
     expect(body.grokCliConnected).toBe(true);
     expect(mocks.getProviderConnections).toHaveBeenCalledWith({ provider: "grok-cli", isActive: true });
+    // Today's usage must come from exactly one single-pass call across all
+    // users, never once per user (the N-rescan bug this fix round closes).
+    expect(mocks.getBansosUsageTotalsAcrossUsers).toHaveBeenCalledTimes(1);
+  });
+
+  it("pages through multiple aggregation pages of users for keyCount, while still summing usage totals in a single pass", async () => {
+    // Simulate 150 Bansos users split across 2 pages of the aggregation
+    // loop (AGGREGATE_PAGE_SIZE = 100) — exercises the
+    // `pagination.hasNext` -> `page += 1` continuation branch that
+    // setupOverviewMocks's single-page (2-user) fixture never reaches.
+    mocks.listBansosUsers.mockImplementation(async ({ page = 1, pageSize } = {}) => {
+      if (pageSize === 1) {
+        return { users: [], pagination: { page: 1, pageSize: 1, totalItems: 150, totalPages: 150, hasNext: true, hasPrev: false } };
+      }
+      if (page === 1) {
+        return {
+          users: Array.from({ length: 100 }, (_, i) => ({ id: `usr_${i}` })),
+          pagination: { page: 1, pageSize: 100, totalItems: 150, totalPages: 2, hasNext: true, hasPrev: false },
+        };
+      }
+      return {
+        users: Array.from({ length: 50 }, (_, i) => ({ id: `usr_${100 + i}` })),
+        pagination: { page: 2, pageSize: 100, totalItems: 150, totalPages: 2, hasNext: false, hasPrev: true },
+      };
+    });
+    mocks.listBansosKeysByUser.mockResolvedValue({
+      keys: [],
+      pagination: { page: 1, pageSize: 1, totalItems: 1, totalPages: 1, hasNext: false, hasPrev: false },
+    });
+    mocks.listBansosPromptAudits.mockResolvedValue({
+      audits: [],
+      pagination: { page: 1, pageSize: 1, totalItems: 0, totalPages: 0, hasNext: false, hasPrev: false },
+    });
+    mocks.getBansosUsageTotalsAcrossUsers.mockResolvedValue({
+      totalRequests: 500, totalPromptTokens: 5000, totalCompletionTokens: 2500, totalCost: 1.23,
+    });
+    mocks.getProviderConnections.mockResolvedValue([]);
+    mocks.getBansosLimiterSnapshot.mockReturnValue({ users: {} });
+
+    const response = await overviewGET(new Request("https://local/api/bansos/overview"));
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // 150 users, 1 key each (from the mocked pagination.totalItems), summed
+    // across both aggregation pages.
+    expect(body.keyCount).toBe(150);
+    expect(body.todayUsage).toEqual({
+      totalRequests: 500, totalPromptTokens: 5000, totalCompletionTokens: 2500, totalCost: 1.23,
+    });
+    // The N-rescan regression this fix closes: usage totals must come from
+    // exactly one call, never one per user (which would be 150 calls here).
+    expect(mocks.getBansosUsageTotalsAcrossUsers).toHaveBeenCalledTimes(1);
+    expect(mocks.listBansosKeysByUser).toHaveBeenCalledTimes(150);
+    // Both aggregation pages of listBansosUsers were actually walked: the
+    // pageSize:1 top-level call, plus pageSize:100 pages 1 and 2.
+    expect(mocks.listBansosUsers).toHaveBeenCalledWith({ page: 1, pageSize: 100 });
+    expect(mocks.listBansosUsers).toHaveBeenCalledWith({ page: 2, pageSize: 100 });
   });
 
   it("does not probe the public host unless explicitly requested", async () => {

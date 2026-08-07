@@ -23,6 +23,7 @@
 import { NextResponse } from "next/server";
 import { getSettings, updateSettings } from "@/lib/db/index.js";
 import { BANSOS_HOST, BANSOS_LIMITS, INTERNAL_MODEL, PUBLIC_MODEL } from "@/lib/bansos/constants.js";
+import { validatePositiveInt } from "@/lib/bansos/adminParams.js";
 
 function toResponseShape(settings) {
   return {
@@ -67,19 +68,15 @@ export async function PATCH(request) {
     }
 
     if (Object.prototype.hasOwnProperty.call(body, "bansosDefaultRequestsPerMinute")) {
-      const n = Number(body.bansosDefaultRequestsPerMinute);
-      if (!Number.isInteger(n) || n < 1) {
-        return NextResponse.json({ error: "bansosDefaultRequestsPerMinute must be an integer >= 1" }, { status: 400 });
-      }
-      patch.bansosDefaultRequestsPerMinute = n;
+      const err = validatePositiveInt(body.bansosDefaultRequestsPerMinute, "bansosDefaultRequestsPerMinute");
+      if (err) return NextResponse.json({ error: err }, { status: 400 });
+      patch.bansosDefaultRequestsPerMinute = Number(body.bansosDefaultRequestsPerMinute);
     }
 
     if (Object.prototype.hasOwnProperty.call(body, "bansosDefaultMaxConcurrentRequests")) {
-      const n = Number(body.bansosDefaultMaxConcurrentRequests);
-      if (!Number.isInteger(n) || n < 1) {
-        return NextResponse.json({ error: "bansosDefaultMaxConcurrentRequests must be an integer >= 1" }, { status: 400 });
-      }
-      patch.bansosDefaultMaxConcurrentRequests = n;
+      const err = validatePositiveInt(body.bansosDefaultMaxConcurrentRequests, "bansosDefaultMaxConcurrentRequests");
+      if (err) return NextResponse.json({ error: err }, { status: 400 });
+      patch.bansosDefaultMaxConcurrentRequests = Number(body.bansosDefaultMaxConcurrentRequests);
     }
 
     if (Object.keys(patch).length === 0) {

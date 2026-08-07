@@ -497,3 +497,67 @@ describe("bansosRepo — usage breakdown", () => {
     await expect(db.getBansosUsageBreakdown()).rejects.toThrow();
   });
 });
+
+describe("bansosRepo — usage totals across users", () => {
+  // Same insertUsageRow helper/contract as the "usage breakdown" describe
+  // block above (meta.bansosUserId is the join key; saveRequestUsage()
+  // doesn't plumb `meta` through yet, per that block's own comment).
+  function insertUsageRow(db, { provider, model, promptTokens, completionTokens, cost = 0, status = "ok", meta }) {
+    db.run(
+      `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        new Date().toISOString(), provider, model, null, null, null,
+        promptTokens, completionTokens, cost, status,
+        JSON.stringify({}), JSON.stringify(meta ?? null),
+      ]
+    );
+  }
+
+  it("sums usage across ALL Bansos users in a single pass, ignoring non-Bansos rows", async () => {
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    const bansosDb = await loadDb();
+    const db = await getAdapter();
+
+    insertUsageRow(db, { provider: "openai", model: "gpt-4", promptTokens: 10, completionTokens: 5, cost: 0.01, meta: { bansosUserId: "bu-1", bansosApiKeyId: "bk-1" } });
+    insertUsageRow(db, { provider: "openai", model: "gpt-4", promptTokens: 20, completionTokens: 8, cost: 0.02, meta: { bansosUserId: "bu-1", bansosApiKeyId: "bk-1" } });
+    insertUsageRow(db, { provider: "anthropic", model: "claude", promptTokens: 100, completionTokens: 50, cost: 0.03, meta: { bansosUserId: "bu-2", bansosApiKeyId: "bk-2" } });
+    // Non-Bansos traffic (no meta.bansosUserId at all) must be excluded.
+    insertUsageRow(db, { provider: "openai", model: "gpt-4", promptTokens: 999, completionTokens: 999, meta: null });
+
+    const totals = await bansosDb.getBansosUsageTotalsAcrossUsers();
+    // 3 Bansos-attributed rows across 2 different users, summed as one.
+    expect(totals).toEqual({
+      totalRequests: 3, totalPromptTokens: 130, totalCompletionTokens: 63, totalCost: 0.06,
+    });
+    // No per-user/model/key breakdown — this primitive is totals-only.
+    expect(totals.byModel).toBeUndefined();
+    expect(totals.byApiKey).toBeUndefined();
+  });
+
+  it("returns zeroed totals when there is no Bansos usage at all", async () => {
+    const db = await loadDb();
+    const totals = await db.getBansosUsageTotalsAcrossUsers();
+    expect(totals).toEqual({
+      totalRequests: 0, totalPromptTokens: 0, totalCompletionTokens: 0, totalCost: 0,
+    });
+  });
+
+  it("respects a startDate filter", async () => {
+    const { getAdapter } = await import("@/lib/db/driver.js");
+    const bansosDb = await loadDb();
+    const db = await getAdapter();
+
+    db.run(
+      `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        new Date(Date.now() - 86400000).toISOString(), "openai", "gpt-4", null, null, null,
+        10, 5, 0.01, "ok", JSON.stringify({}), JSON.stringify({ bansosUserId: "bu-old", bansosApiKeyId: "bk-old" }),
+      ]
+    );
+    insertUsageRow(db, { provider: "openai", model: "gpt-4", promptTokens: 20, completionTokens: 8, cost: 0.02, meta: { bansosUserId: "bu-new", bansosApiKeyId: "bk-new" } });
+
+    const totals = await bansosDb.getBansosUsageTotalsAcrossUsers({ startDate: new Date(Date.now() - 3600000).toISOString() });
+    expect(totals.totalRequests).toBe(1);
+    expect(totals.totalPromptTokens).toBe(20);
+  });
+});

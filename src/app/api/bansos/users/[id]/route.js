@@ -2,14 +2,7 @@
 // (activation, name, RPM, concurrency). Task 12.
 import { NextResponse } from "next/server";
 import { getBansosUserById, updateBansosUser } from "@/lib/db/index.js";
-
-function validatePositiveInt(value, label) {
-  const n = Number(value);
-  if (!Number.isInteger(n) || n < 1) {
-    return `${label} must be an integer >= 1`;
-  }
-  return null;
-}
+import { validatePositiveInt } from "@/lib/bansos/adminParams.js";
 
 // GET /api/bansos/users/[id] - fetch a single user
 export async function GET(request, { params }) {
