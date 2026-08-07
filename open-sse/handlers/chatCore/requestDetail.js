@@ -93,13 +93,39 @@ export function formatDoneLine({ usage, latency }) {
   return `DONE ${latency?.total ?? 0}ms${ttftStr} · ${inStr} · OUT ${outTok}`;
 }
 
-export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, label = "USAGE", silent = false }) {
+// Bansos usage-attribution meta, shared by every completion handler that
+// persists a usageHistory row (non-streaming, forced-SSE-to-JSON, streaming
+// success + interrupted). Keys are `bansos`-prefixed deliberately — they are
+// NOT the same names as bansosContext's own fields, so a reader of the DB
+// row can't confuse "the context object's field" with "the DB's audit key".
+// Returns undefined for a null/undefined bansosContext so ordinary calls can
+// spread/pass it straight through to `meta` without an extra branch.
+export function buildBansosUsageMeta(bansosContext, extra = {}) {
+  if (!bansosContext) return undefined;
+  return {
+    bansosUserId: bansosContext.userId,
+    bansosApiKeyId: bansosContext.apiKeyId,
+    bansosRequestId: bansosContext.requestId,
+    bansosPublicModel: bansosContext.publicModel,
+    bansosInternalModel: bansosContext.internalModel,
+    ...extra,
+  };
+}
+
+export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, endpoint, label = "USAGE", silent = false, meta, status }) {
   if (!tokens || typeof tokens !== "object") return;
 
   const inTokens = tokens.input_tokens ?? tokens.prompt_tokens ?? 0;
   const outTokens = tokens.output_tokens ?? tokens.completion_tokens ?? 0;
 
-  if (inTokens === 0 && outTokens === 0) return;
+  // Ordinary zero-usage requests are skipped — nothing was measured, nothing
+  // to log. status:"interrupted" is the one deliberate exception: it means
+  // "the stream ended before any usage was ever reported", which is a real
+  // event a Bansos caller must be able to see in usageHistory even though
+  // the token columns can only hold 0 — see the tokensUnavailable meta flag
+  // the caller sets alongside it. Skipping the write here would silently
+  // drop that distinction.
+  if (inTokens === 0 && outTokens === 0 && status !== "interrupted") return;
 
   if (!silent) {
     const time = new Date().toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -121,6 +147,8 @@ export function saveUsageStats({ provider, model, tokens, connectionId, apiKey, 
     timestamp: new Date().toISOString(),
     connectionId: connectionId || undefined,
     apiKey: apiKey || undefined,
-    endpoint: endpoint || null
+    endpoint: endpoint || null,
+    meta: meta || {},
+    ...(status ? { status } : {})
   }).catch(() => {});
 }

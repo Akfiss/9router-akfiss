@@ -255,7 +255,7 @@ export async function saveRequestUsage(entry) {
     // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
     db.transaction(() => {
       const existing = db.get(
-        `SELECT id, endpoint FROM usageHistory
+        `SELECT id, endpoint, meta FROM usageHistory
          WHERE timestamp = ?
            AND COALESCE(provider, '') = COALESCE(?, '')
            AND COALESCE(model, '') = COALESCE(?, '')
@@ -275,6 +275,17 @@ export async function saveRequestUsage(entry) {
         if (!existing.endpoint && entry.endpoint) {
           db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
         }
+        // Backfill meta the same way endpoint is backfilled above: only fill
+        // the gap when the existing row has none and the new write actually
+        // has some — never clobber meta that's already populated. This is
+        // what keeps a duplicate-row match from silently dropping Bansos
+        // attribution if a dedupe match ever occurs for an attributed request.
+        const existingMeta = parseJson(existing.meta, {});
+        const hasExistingMeta = existingMeta && Object.keys(existingMeta).length > 0;
+        const hasNewMeta = entry.meta && Object.keys(entry.meta).length > 0;
+        if (!hasExistingMeta && hasNewMeta) {
+          db.run(`UPDATE usageHistory SET meta = ? WHERE id = ?`, [stringifyJson(entry.meta), existing.id]);
+        }
         return;
       }
 
@@ -284,7 +295,7 @@ export async function saveRequestUsage(entry) {
           entry.timestamp, entry.provider || null, entry.model || null,
           entry.connectionId || null, entry.apiKey || null, entry.endpoint || null,
           promptTokens, completionTokens, entry.cost || 0, entry.status || "ok",
-          stringifyJson(tokens), stringifyJson({}),
+          stringifyJson(tokens), stringifyJson(entry.meta || {}),
         ]
       );
 

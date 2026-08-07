@@ -6,7 +6,7 @@ import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTrackin
 import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
-import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
+import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine, buildBansosUsageMeta } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
@@ -281,7 +281,7 @@ export function translateNonStreamingResponse(responseBody, targetFormat, source
 /**
  * Handle non-streaming response from provider.
  */
-export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log }) {
+export async function handleNonStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, trackDone, appendLog, pxpipe, reqTag, log, bansosContext }) {
   trackDone();
   const contentType = providerResponse.headers.get("content-type") || "";
   let responseBody;
@@ -318,7 +318,10 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
 
   const usage = extractUsageFromResponse(responseBody);
   appendLog({ tokens: usage, status: "200 OK" });
-  saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
+  saveUsageStats({
+    provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true,
+    meta: buildBansosUsageMeta(bansosContext), status: bansosContext ? "success" : undefined
+  });
   if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
   const translatedResponse = needsTranslation(targetFormat, sourceFormat)
@@ -388,6 +391,22 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   }, { endpoint: clientRawRequest?.endpoint || null })).catch(err => {
     console.error("[RequestDetail] Failed to save:", err.message);
   });
+
+  // Release point for the Bansos concurrency lease. Deliberately NOT a
+  // blanket try/finally around this whole function: the two early
+  // `createErrorResult(HTTP_STATUS.BAD_GATEWAY, ...)` returns above (bad
+  // SSE/JSON from upstream) flow back into dispatchSingleModelChat's
+  // account-fallback loop in src/sse/handlers/chat.js, which calls
+  // markAccountUnavailable() and — confirmed via checkFallbackError()
+  // (open-sse/services/accountFallback.js), which returns
+  // `shouldFallback: true` for EVERY status/error, including these — may
+  // `continue` the loop and retry with a different provider account under
+  // the SAME bansosContext/lease. Releasing there would free the user's
+  // concurrency slot while the request is still internally retrying. Only
+  // this true, terminal success exit releases; every early return above
+  // leaves the lease for Task 8's fallback loop (or chat.js's outer
+  // catch-all on a thrown exception) to own.
+  if (bansosContext) bansosContext.release();
 
   return {
     success: true,
