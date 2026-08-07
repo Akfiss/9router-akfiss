@@ -38,6 +38,22 @@ export function isKeyRevoked(key) {
   return !!key?.revokedAt;
 }
 
+// Shared by both the create and edit forms: omits requestsPerMinute/
+// maxConcurrentRequests when the corresponding field is blank so the server
+// applies the gateway default, instead of coercing "" -> Number("") -> 0,
+// which the server's validatePositiveInt (src/lib/bansos/adminParams.js)
+// rejects with a 400. handleCreateUser already applied this conditional
+// inclusion inline; handleSaveEdit did not (it sent Number(editForm.x)
+// unconditionally), so an admin could never clear a limit while editing an
+// existing user. Extracted once so both handlers share the exact same
+// omit-when-blank behavior and it's directly testable.
+export function buildUserLimitsPayload({ requestsPerMinute, maxConcurrentRequests } = {}) {
+  const payload = {};
+  if (requestsPerMinute !== "") payload.requestsPerMinute = Number(requestsPerMinute);
+  if (maxConcurrentRequests !== "") payload.maxConcurrentRequests = Number(maxConcurrentRequests);
+  return payload;
+}
+
 export async function fetchGatewayUsers({ page = 1, pageSize = 20 } = {}) {
   const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
   const res = await fetch(`/api/bansos/users?${params}`);

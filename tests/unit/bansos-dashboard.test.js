@@ -29,6 +29,7 @@ import {
 import {
   validateUserForm,
   isKeyRevoked,
+  buildUserLimitsPayload,
   fetchGatewayUsers,
   createGatewayUser,
   updateGatewayUser,
@@ -46,6 +47,8 @@ import {
 } from "../../src/app/(dashboard)/dashboard/bansos/components/UsageLogsTab.logic.js";
 import {
   READ_ONLY_SETTINGS_FIELDS,
+  DEFAULT_LIMIT_DEBOUNCE_MS,
+  debounce,
   fetchGatewaySettings,
   updateGatewayEnabled,
   updateDefaultRequestsPerMinute,
@@ -214,6 +217,40 @@ describe("UsersKeysTab: key revoked-state helper", () => {
 
   it("is defensive against a missing key", () => {
     expect(isKeyRevoked(undefined)).toBe(false);
+  });
+});
+
+describe("UsersKeysTab: limits payload shaping (blank field = gateway default)", () => {
+  // Review finding 1: handleSaveEdit used to send Number(editForm.x)
+  // unconditionally, so clearing a limit field before saving an edit sent
+  // 0 (Number("") === 0), which the server's validatePositiveInt rejects
+  // with a 400 — an admin could never clear a limit while editing. Fix:
+  // both handleCreateUser and handleSaveEdit now build their payload/patch
+  // via this one shared helper.
+  it("omits both fields when both are blank (edit form clearing both limits)", () => {
+    expect(buildUserLimitsPayload({ requestsPerMinute: "", maxConcurrentRequests: "" })).toEqual({});
+  });
+
+  it("omits only the blanked field, keeping the other explicit and coerced to Number", () => {
+    expect(buildUserLimitsPayload({ requestsPerMinute: "", maxConcurrentRequests: "3" })).toEqual({
+      maxConcurrentRequests: 3,
+    });
+    expect(buildUserLimitsPayload({ requestsPerMinute: "5", maxConcurrentRequests: "" })).toEqual({
+      requestsPerMinute: 5,
+    });
+  });
+
+  it("includes both fields, coerced to Number, when both are set", () => {
+    expect(buildUserLimitsPayload({ requestsPerMinute: "5", maxConcurrentRequests: "3" })).toEqual({
+      requestsPerMinute: 5,
+      maxConcurrentRequests: 3,
+    });
+  });
+
+  it("never coerces a blank field to 0 (the exact bug: Number('') === 0)", () => {
+    const payload = buildUserLimitsPayload({ requestsPerMinute: "", maxConcurrentRequests: "" });
+    expect(payload).not.toHaveProperty("requestsPerMinute");
+    expect(payload).not.toHaveProperty("maxConcurrentRequests");
   });
 });
 
@@ -441,5 +478,49 @@ describe("SettingsTab: new-user default limits", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ bansosDefaultMaxConcurrentRequests: 4 }),
     });
+  });
+});
+
+describe("SettingsTab: debounced live-input gating (no PATCH per keystroke)", () => {
+  // Review finding 2: handleRpmChange/handleConcurrencyChange used to call
+  // updateDefaultRequestsPerMinute/updateDefaultMaxConcurrentRequests
+  // directly on every onChange, so typing a two-digit value like "15"
+  // fired a real PATCH persisting "1" for one round-trip before a second
+  // PATCH corrected it to "15". Fix: SettingsTab.js now routes both
+  // handlers through this debounce() wrapper (DEFAULT_LIMIT_DEBOUNCE_MS),
+  // so only the final value after a pause in typing is ever sent.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("does not invoke the wrapped function synchronously", () => {
+    vi.useFakeTimers();
+    const fn = vi.fn();
+    const debounced = debounce(fn, DEFAULT_LIMIT_DEBOUNCE_MS);
+    debounced(1);
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it("does not fire until the full wait period has elapsed since the last call", () => {
+    vi.useFakeTimers();
+    const fn = vi.fn();
+    const debounced = debounce(fn, DEFAULT_LIMIT_DEBOUNCE_MS);
+    debounced(1);
+    vi.advanceTimersByTime(DEFAULT_LIMIT_DEBOUNCE_MS - 1);
+    expect(fn).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("collapses rapid successive keystrokes into a single call with only the final value (the exact bug scenario: typing '1' then '15')", () => {
+    vi.useFakeTimers();
+    const fn = vi.fn();
+    const debounced = debounce(fn, DEFAULT_LIMIT_DEBOUNCE_MS);
+    debounced(1); // "1" typed
+    vi.advanceTimersByTime(50);
+    debounced(15); // "15" typed shortly after, before the debounce window closes
+    vi.advanceTimersByTime(DEFAULT_LIMIT_DEBOUNCE_MS);
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(fn).toHaveBeenCalledWith(15);
   });
 });

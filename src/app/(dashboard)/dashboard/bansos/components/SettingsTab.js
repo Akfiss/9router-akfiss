@@ -1,10 +1,12 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, Toggle, CardSkeleton } from "@/shared/components";
 import Input from "@/shared/components/Input";
 import {
   READ_ONLY_SETTINGS_FIELDS,
+  DEFAULT_LIMIT_DEBOUNCE_MS,
+  debounce,
   fetchGatewaySettings,
   updateGatewayEnabled,
   updateDefaultRequestsPerMinute,
@@ -46,34 +48,51 @@ export default function SettingsTab() {
     }
   };
 
-  const handleRpmChange = async (value) => {
+  // Debounced so a live PATCH fires at most once per pause in typing, not on
+  // every keystroke — see DEFAULT_LIMIT_DEBOUNCE_MS's comment in
+  // SettingsTab.logic.js. Each ref is created once (React ignores the
+  // useRef initializer on re-renders) so the debounce window spans the
+  // whole input session rather than resetting per render.
+  const commitRpm = useRef(
+    debounce(async (parsed) => {
+      try {
+        const res = await updateDefaultRequestsPerMinute(parsed);
+        if (res.ok) {
+          const data = await res.json();
+          setSettings((prev) => ({ ...prev, defaultRequestsPerMinute: data.defaultRequestsPerMinute }));
+        }
+      } catch (error) {
+        console.error("Failed to update default requests per minute:", error);
+      }
+    }, DEFAULT_LIMIT_DEBOUNCE_MS)
+  ).current;
+
+  const commitConcurrency = useRef(
+    debounce(async (parsed) => {
+      try {
+        const res = await updateDefaultMaxConcurrentRequests(parsed);
+        if (res.ok) {
+          const data = await res.json();
+          setSettings((prev) => ({ ...prev, defaultMaxConcurrentRequests: data.defaultMaxConcurrentRequests }));
+        }
+      } catch (error) {
+        console.error("Failed to update default max concurrent requests:", error);
+      }
+    }, DEFAULT_LIMIT_DEBOUNCE_MS)
+  ).current;
+
+  const handleRpmChange = (value) => {
     setRpmInput(value);
     const parsed = parseInt(value, 10);
     if (!Number.isInteger(parsed) || parsed < 1) return;
-    try {
-      const res = await updateDefaultRequestsPerMinute(parsed);
-      if (res.ok) {
-        const data = await res.json();
-        setSettings((prev) => ({ ...prev, defaultRequestsPerMinute: data.defaultRequestsPerMinute }));
-      }
-    } catch (error) {
-      console.error("Failed to update default requests per minute:", error);
-    }
+    commitRpm(parsed);
   };
 
-  const handleConcurrencyChange = async (value) => {
+  const handleConcurrencyChange = (value) => {
     setConcurrencyInput(value);
     const parsed = parseInt(value, 10);
     if (!Number.isInteger(parsed) || parsed < 1) return;
-    try {
-      const res = await updateDefaultMaxConcurrentRequests(parsed);
-      if (res.ok) {
-        const data = await res.json();
-        setSettings((prev) => ({ ...prev, defaultMaxConcurrentRequests: data.defaultMaxConcurrentRequests }));
-      }
-    } catch (error) {
-      console.error("Failed to update default max concurrent requests:", error);
-    }
+    commitConcurrency(parsed);
   };
 
   if (loading || !settings) return <CardSkeleton />;

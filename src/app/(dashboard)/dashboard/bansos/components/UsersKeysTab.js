@@ -7,6 +7,7 @@ import OneTimeKeyModal from "./OneTimeKeyModal";
 import {
   validateUserForm,
   isKeyRevoked,
+  buildUserLimitsPayload,
   fetchGatewayUsers,
   createGatewayUser,
   updateGatewayUser,
@@ -102,9 +103,7 @@ export default function UsersKeysTab() {
     setCreatingUser(true);
     setCreateError("");
     try {
-      const payload = { name: createForm.name.trim() };
-      if (createForm.requestsPerMinute !== "") payload.requestsPerMinute = Number(createForm.requestsPerMinute);
-      if (createForm.maxConcurrentRequests !== "") payload.maxConcurrentRequests = Number(createForm.maxConcurrentRequests);
+      const payload = { name: createForm.name.trim(), ...buildUserLimitsPayload(createForm) };
 
       const res = await createGatewayUser(payload);
       const data = await res.json().catch(() => ({}));
@@ -145,9 +144,8 @@ export default function UsersKeysTab() {
     try {
       const patch = {
         name: editForm.name.trim(),
-        requestsPerMinute: Number(editForm.requestsPerMinute),
-        maxConcurrentRequests: Number(editForm.maxConcurrentRequests),
         isActive: editForm.isActive,
+        ...buildUserLimitsPayload(editForm),
       };
       const res = await updateGatewayUser(editingUser.id, patch);
       const data = await res.json().catch(() => ({}));
