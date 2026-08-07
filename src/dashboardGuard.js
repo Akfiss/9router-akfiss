@@ -69,6 +69,11 @@ const PROTECTED_API_PATHS = [
 
 // Routes that spawn child processes or read host secrets — restrict to localhost.
 const LOCAL_ONLY_PATHS = [
+  // Bansos Gateway admin/observability API (Task 12) — local-only, and (since
+  // it isn't in PUBLIC_API_PATHS or PROTECTED_API_PATHS's public-LLM-API
+  // carve-outs) still falls through to the deny-by-default `/api/*` branch
+  // below, so it additionally requires a CLI token or dashboard auth.
+  "/api/bansos",
   "/api/cli-tools/cowork-settings",
   "/api/cli-tools/antigravity-mitm",
   "/api/mcp/",
