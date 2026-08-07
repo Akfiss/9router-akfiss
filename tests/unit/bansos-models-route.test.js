@@ -27,16 +27,19 @@ vi.mock("@/shared/constants/providers", () => ({
   isOpenAICompatibleProvider: vi.fn(),
 }));
 
-vi.mock("@/lib/localDb", () => ({
+const mockLocalDb = {
   getProviderConnections: vi.fn(),
   getCombos: vi.fn(),
   getCustomModels: vi.fn(),
   getModelAliases: vi.fn(),
-}));
+};
 
-vi.mock("@/lib/disabledModelsDb", () => ({
+const mockDisabledDb = {
   getDisabledModels: vi.fn(),
-}));
+};
+
+vi.mock("@/lib/localDb", () => mockLocalDb);
+vi.mock("@/lib/disabledModelsDb", () => mockDisabledDb);
 
 vi.mock("open-sse/services/kiroModels.js", () => ({
   resolveKiroModels: vi.fn(),
@@ -83,7 +86,7 @@ vi.mock("open-sse/providers/capabilities.js", () => ({
   getCapabilitiesForModel: vi.fn(),
 }));
 
-const { GET } = await import("../../src/app/api/v1/models/route.js");
+const { GET, buildModelsList } = await import("../../src/app/api/v1/models/route.js");
 
 describe("GET /v1/models", () => {
   beforeEach(() => {
@@ -145,5 +148,37 @@ describe("GET /v1/models", () => {
     await GET(request);
 
     expect(mocks.isBansosHost).toHaveBeenCalledWith("api.priaoslo.web.id");
+  });
+
+  it("executes existing catalog path for non-Bansos hosts", async () => {
+    // REGRESSION TEST: Ensure the expensive catalog path still runs for normal hosts
+    mocks.isBansosHost.mockReturnValue(false);
+
+    // Mock the DB functions to return empty results (this triggers the static model fallback path)
+    mockLocalDb.getProviderConnections.mockResolvedValue([]);
+    mockLocalDb.getCombos.mockResolvedValue([]);
+    mockLocalDb.getCustomModels.mockResolvedValue([]);
+    mockLocalDb.getModelAliases.mockResolvedValue({});
+    mockDisabledDb.getDisabledModels.mockResolvedValue({});
+
+    const request = {
+      headers: {
+        get: (name) => {
+          if (name === "host") return "localhost";
+          return null;
+        },
+      },
+    };
+
+    const response = await GET(request);
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    // Should return a response from buildModelsList (not the one-model Bansos response)
+    // With mocked empty DB, it will return the static models from PROVIDER_MODELS (which is also mocked empty)
+    expect(body.object).toBe("list");
+    expect(Array.isArray(body.data)).toBe(true);
+    // Verify the DB functions were actually called (proves we hit the buildModelsList path)
+    expect(mockLocalDb.getProviderConnections).toHaveBeenCalled();
   });
 });
