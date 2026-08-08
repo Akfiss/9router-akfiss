@@ -501,6 +501,17 @@ describe("Lease release across success / error / stream-completion / disconnect 
     const first = await dispatch(stack, { pathname: "/v1/chat/completions", headers, body: chatBody() });
     expect(first.response.status).toBe(200);
 
+    // Real OpenAI chat-completion shape, not just a 200 — this is the
+    // handleForcedSSEToJson output (open-sse/handlers/chatCore/
+    // sseToJsonHandler.js): the client asked for stream:false, grok-cli
+    // force-streamed a genuine Responses-API SSE sequence regardless (see
+    // jsonSuccessResponse()'s doc comment), and this converts+translates
+    // that back into a standard Chat Completions body before it ever
+    // reaches the client.
+    const body = await jsonOf(first.response);
+    expect(body.object).toBe("chat.completion");
+    expect(body.choices[0].message.content).toBe("Hello from the Bansos mock executor.");
+
     expect(await activeLeaseCount(stack, user.id)).toBe(0);
   });
 
