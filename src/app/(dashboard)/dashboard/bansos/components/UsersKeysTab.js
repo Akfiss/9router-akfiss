@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Modal, ConfirmModal, Pagination, Toggle } from "@/shared/components";
+import { Card, Button, Modal, ConfirmModal, Toggle } from "@/shared/components";
 import Input from "@/shared/components/Input";
+import Pagination from "@/shared/components/Pagination";
 import OneTimeKeyModal from "./OneTimeKeyModal";
 import {
   validateUserForm,

@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Pagination, ConfirmModal } from "@/shared/components";
+import { Card, Button, ConfirmModal } from "@/shared/components";
 import Input from "@/shared/components/Input";
+import Pagination from "@/shared/components/Pagination";
 import { cn } from "@/shared/utils/cn";
 import {
   isPromptExpired,
