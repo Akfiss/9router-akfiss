@@ -425,18 +425,29 @@ describe("Bansos chat policy — success path rewrites model and attaches bansos
     expect(call.clientRawRequest.body.messages[0].content).toBe("hi");
   });
 
-  it("threads the same bansosContext through the capacity-adapter multi-model path", async () => {
+  it("final-review fix: bypasses combo/fusion/capacity-adapter dispatch entirely and pins to the internal model, even when augmentation/combo lookup would otherwise add other models", async () => {
     const releaseFn = vi.fn();
     mocks.acquireBansosChat.mockReturnValue({ ok: true, release: releaseFn });
-    // Force the capacity-adapter branch: pretend augmentation added a 2nd model.
+    // Even if capacity-adapter augmentation or a combo lookup would normally
+    // route this request to more than one model, a Bansos request must
+    // never reach either — the internal model is pinned end-to-end via the
+    // early return in handleChat, before detectRequiredCapabilities/
+    // getComboModels/augmentModelsWithCapacityAdapter ever run.
     mocks.augmentModelsWithCapacityAdapter.mockImplementation((models) => [...models, "openai/gpt-4o"]);
+    mocks.getComboModels.mockResolvedValue(["openai/gpt-4o", "openai/gpt-4o-mini"]);
 
     const req = makeRequest({ host: BANSOS_HOST, headers: bansosHeaders() });
     await handleChat(req);
 
-    expect(mocks.handleComboChat).toHaveBeenCalledTimes(1);
+    expect(mocks.detectRequiredCapabilities).not.toHaveBeenCalled();
+    expect(mocks.getComboModels).not.toHaveBeenCalled();
+    expect(mocks.augmentModelsWithCapacityAdapter).not.toHaveBeenCalled();
+    expect(mocks.handleComboChat).not.toHaveBeenCalled();
+    expect(mocks.handleFusionChat).not.toHaveBeenCalled();
+
     expect(mocks.handleChatCore).toHaveBeenCalledTimes(1);
     const call = mocks.handleChatCore.mock.calls[0][0];
+    expect(call.body.model).toBe(INTERNAL_MODEL);
     expect(call.bansosContext).toMatchObject({ userId: "user_123", release: releaseFn });
   });
 });

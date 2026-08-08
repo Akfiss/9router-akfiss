@@ -40,6 +40,13 @@ const ORPHAN_RELEASE_MS = BANSOS_LIMITS.maxStreamDurationMs;
 // value — see task-6-report.md for the reasoning.
 const CONCURRENCY_RETRY_AFTER_SECONDS = 1;
 
+// Defense-in-depth: a non-finite/non-positive limit must never fail open
+// into "unlimited requests allowed" — fall back to the same defaults the
+// DB schema/repo layer already guarantees in practice.
+function coerceLimit(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 /**
  * Create an isolated limiter instance. Every call gets its own in-memory
  * state — nothing is shared across instances (tests rely on this for
@@ -94,6 +101,9 @@ export function createBansosLimiter({
    * @returns {{ ok: true, release: () => void } | { ok: false, reason: string, retryAfterSeconds: number | null }}
    */
   function acquireBansosChat(userId, { requestsPerMinute, maxConcurrentRequests } = {}) {
+    requestsPerMinute = coerceLimit(requestsPerMinute, BANSOS_LIMITS.defaultRequestsPerMinute);
+    maxConcurrentRequests = coerceLimit(maxConcurrentRequests, BANSOS_LIMITS.defaultMaxConcurrentRequests);
+
     const currentTime = now();
     const user = getOrCreateUser(userId);
 

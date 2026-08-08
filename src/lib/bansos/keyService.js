@@ -24,6 +24,13 @@ export const BANSOS_KEY_PREFIX = "bns_";
 const KEY_RANDOM_BYTES = 24; // -> 48 lowercase hex chars
 const KEY_FORMAT = /^bns_[a-f0-9]{48}$/;
 
+// verifyBansosKey runs on every valid-key request, upstream of the rate
+// limiter — an awaited DB write here on every single request is a cheap
+// denial-of-service amplifier. Throttle the "last used" touch to once per
+// key per this window; it's a best-effort timestamp, not correctness-critical.
+const LAST_USED_TOUCH_THROTTLE_MS = 60 * 1000;
+const lastTouchByKeyId = new Map();
+
 /**
  * Generate a new plaintext Bansos key: `bns_` + 24 random bytes as lowercase
  * hex (48 chars). Pure/sync — crypto.randomBytes is synchronous in Node.
@@ -110,8 +117,14 @@ export async function verifyBansosKey(plaintext) {
     return { ok: false, status: 403, code: "user_disabled" };
   }
 
-  const lastUsedAt = new Date().toISOString();
-  await touchBansosKeyLastUsed(key.id, lastUsedAt);
+  const nowMs = Date.now();
+  const lastUsedAt = new Date(nowMs).toISOString();
+  const lastTouchMs = lastTouchByKeyId.get(key.id);
+  if (lastTouchMs === undefined || nowMs - lastTouchMs >= LAST_USED_TOUCH_THROTTLE_MS) {
+    lastTouchByKeyId.set(key.id, nowMs);
+    // Fire-and-forget: never block the hot path on this write.
+    touchBansosKeyLastUsed(key.id, lastUsedAt).catch(() => {});
+  }
 
   return { ok: true, user, key: { ...key, lastUsedAt } };
 }

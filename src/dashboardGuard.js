@@ -183,6 +183,8 @@ async function handleBansosRequest(request) {
   // Clone headers, strip the plaintext credential, stamp verified opaque IDs.
   const headers = new Headers(request.headers);
   headers.delete("authorization");
+  headers.delete("x-api-key");
+  headers.delete("x-goog-api-key");
   headers.set("x-9r-bansos-user-id", result.user.id);
   headers.set("x-9r-bansos-key-id", result.key.id);
   return NextResponse.next({ request: { headers } });

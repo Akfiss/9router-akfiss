@@ -100,15 +100,21 @@ credentials-file: C:\Users\<you>\.cloudflared\<TUNNEL-UUID>.json
 
 ingress:
   - hostname: api.priaoslo.web.id
+    path: ^/v1/(chat/completions|models)$
     service: http://127.0.0.1:20127
   - service: http_status:404
 ```
 
 The trailing `http_status:404` catch-all is required by `cloudflared` — any
 request that doesn't match a named `hostname` rule above it gets a plain
-404 from the Cloudflare edge, never reaching your machine at all. Since
-this tunnel only ever routes `api.priaoslo.web.id`, that's exactly the
-behavior you want: nothing else this tunnel could ever proxy leaks through.
+404 from the Cloudflare edge, never reaching your machine at all. The
+`path` regex on the `hostname` rule narrows this further to the exact two
+routes the Bansos gate itself allows (`POST /v1/chat/completions`, `GET
+/v1/models` — see `src/lib/bansos/policy.js`'s `isAllowedBansosEndpoint`):
+any other path on this hostname, including Next.js's own static-asset
+paths, now 404s at Cloudflare's edge before ever reaching your machine at
+all — on top of, not instead of, 9Router's own gate rejecting anything
+that this path restriction somehow let through.
 
 ## Step 4 — Route DNS to the tunnel
 
@@ -222,8 +228,10 @@ A `401` with `"invalid_api_key"` means the key is wrong/revoked; a `403`
 means the key is valid but the owning Bansos user is disabled; a `429`
 means the per-user rate or concurrency limit was hit; a `503` means the
 gateway kill switch is currently off (see the dashboard's Bansos Gateway
-panel). A `404` on any path other than the two above is expected — the
-public hostname intentionally serves nothing else.
+panel). A `404` on any other `/v1/*` path (or the right path with the wrong
+method) means the Bansos gate's own endpoint/method allowlist rejected it —
+see "Why this is safe to expose" below for what happens on paths outside
+`/v1/*` entirely (they never reach the gate, or 9Router, at all).
 
 After a successful call, confirm it shows up exactly once in
 `http://localhost:20127/dashboard/usage`, attributed to the Bansos user and
@@ -234,14 +242,32 @@ user/key.
 
 ## Why this is safe to expose
 
-`api.priaoslo.web.id` only ever reaches 9Router's Bansos branch — the
-public-host gate (`src/dashboardGuard.js`, `src/lib/bansos/policy.js`)
-checks the inbound `Host` header before anything else runs, and on this
-hostname it accepts *only* `GET /v1/models` and `POST
-/v1/chat/completions`, *only* with a valid, active `bns_...` key, routed
-internally to a single fixed model. The dashboard, every other `/v1`
-surface, and ordinary internal API keys are unreachable through this
-tunnel regardless of what headers a client sends — the tunnel's `ingress`
-config in Step 3 doesn't even know those routes exist; it forwards
-everything for this hostname to the same local port, and 9Router's own
-Host-based gate does the rest.
+`api.priaoslo.web.id` only ever reaches 9Router's Bansos branch for `/v1/*`
+traffic — the public-host gate (`src/dashboardGuard.js`,
+`src/lib/bansos/policy.js`) checks the inbound `Host` header before
+anything else runs, and on this hostname it accepts *only* `GET
+/v1/models` and `POST /v1/chat/completions`, *only* with a valid, active
+`bns_...` key, routed internally to a single fixed model. The dashboard,
+every other `/v1` surface, and ordinary internal API keys are unreachable
+through this tunnel regardless of what headers a client sends — the
+`path` restriction on the tunnel's `ingress` config (Step 3) narrows this
+further, and 9Router's own Host-based gate is the actual enforcement point
+either way, independent of whatever a given tunnel/proxy config allows
+through.
+
+One class of path does NOT go through that gate at all, and it's worth
+being precise about why that's still fine: 9Router's Next.js middleware
+matcher (`src/proxy.js`) excludes `_next/static/*`, `_next/image`, and
+`favicon.ico` app-wide — requests to those paths never invoke
+`dashboardGuard.js` in the first place, on any hostname, so they are
+*served*, not gated. That's an accepted, low-severity gap, not an
+oversight: `_next/static` filenames are content-hashed build output with
+no secrets in them, `_next/image` only proxies/resizes images the app
+already serves, and `favicon.ico` is a static icon — none of it exposes
+credentials, user data, or any Bansos-specific surface. The `ingress`
+`path` restriction in Step 3 already keeps this particular tunnel from
+ever routing to those paths anyway (it only forwards the two `/v1/*`
+routes above), but even without that restriction this is why widening
+`src/proxy.js`'s matcher to also gate those three paths isn't warranted —
+it would add gate overhead to every static-asset request across the whole
+app for a cost disproportionate to the gap it would close.

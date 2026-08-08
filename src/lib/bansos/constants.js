@@ -25,4 +25,10 @@ export const BANSOS_LIMITS = Object.freeze({
 
   // Prompt retention period: 7 days
   promptRetentionDays: 7,
+
+  // Fail-closed floors for the rate limiter, matching the DB schema/repo
+  // layer defaults (src/lib/db/schema.js, src/lib/db/repos/bansosRepo.js) —
+  // used only if a caller ever passes a non-finite/non-positive limit.
+  defaultRequestsPerMinute: 10,
+  defaultMaxConcurrentRequests: 2,
 });

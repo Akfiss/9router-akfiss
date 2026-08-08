@@ -77,11 +77,11 @@ function bansosErrorResponse(result) {
  *   6. the requested model is exactly the public Bansos model
  *   7. the per-user rate + concurrency limiter (Task 6)
  *
- * On success, returns a shallow-cloned body with `model` rewritten to the
- * internal dispatch model (never mutates the caller's original `body` —
- * `clientRawRequest.body` still holds the untouched original for Task 10's
- * prompt-audit feature) plus a ready-to-use bansosContext carrying the
- * limiter's `release()` closure.
+ * On success, returns a deep-cloned (structuredClone) body with `model`
+ * rewritten to the internal dispatch model (never mutates the caller's
+ * original `body` — `clientRawRequest.body` still holds the untouched
+ * original for Task 10's prompt-audit feature) plus a ready-to-use
+ * bansosContext carrying the limiter's `release()` closure.
  *
  * @returns {Promise<{error: Response} | {body: object, context: object}>}
  */
@@ -293,6 +293,14 @@ export async function handleChat(request, clientRawRequest = null) {
     // file for every releaseBansosLease( call.
     finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200 });
     return bypassResponse.response || bypassResponse;
+  }
+
+  // Bansos requests are pinned to a single fixed internal model end-to-end —
+  // never let one fall through into combo/fusion/capacity-adapter expansion,
+  // which could otherwise dispatch it against a model other than the one
+  // resolveBansosChatRequest already rewrote body.model to.
+  if (bansosContext) {
+    return handleSingleModelChat(body, BANSOS_INTERNAL_MODEL, clientRawRequest, request, apiKey, bansosContext);
   }
 
   const requiredCapabilities = detectRequiredCapabilities(body);

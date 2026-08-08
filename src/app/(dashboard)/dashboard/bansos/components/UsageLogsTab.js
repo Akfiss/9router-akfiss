@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Pagination } from "@/shared/components";
+import { Card, Button, Pagination, ConfirmModal } from "@/shared/components";
 import Input from "@/shared/components/Input";
 import { cn } from "@/shared/utils/cn";
 import {
@@ -21,6 +21,7 @@ export default function UsageLogsTab() {
   const [retentionDays, setRetentionDays] = useState(null);
   const [erasingId, setErasingId] = useState(null);
   const [eraseError, setEraseError] = useState("");
+  const [eraseTarget, setEraseTarget] = useState(null);
 
   useEffect(() => {
     fetch("/api/bansos/settings")
@@ -47,7 +48,9 @@ export default function UsageLogsTab() {
     loadAudits();
   }, [loadAudits]);
 
-  const handleErase = async (requestId) => {
+  const handleEraseConfirm = async () => {
+    if (!eraseTarget) return;
+    const requestId = eraseTarget.requestId;
     setErasingId(requestId);
     setEraseError("");
     try {
@@ -61,12 +64,20 @@ export default function UsageLogsTab() {
       setEraseError("An error occurred");
     } finally {
       setErasingId(null);
+      setEraseTarget(null);
     }
   };
 
   const handlePageChange = (page) => setPagination((prev) => ({ ...prev, page }));
   const handlePageSizeChange = (pageSize) => setPagination((prev) => ({ ...prev, pageSize, page: 1 }));
-  const handleClearFilters = () => setFilters({ userId: "", apiKeyId: "", status: "" });
+  const updateFilter = (key, value) => {
+    setFilters((f) => ({ ...f, [key]: value }));
+    setPagination((prev) => ({ ...prev, page: 1 }));
+  };
+  const handleClearFilters = () => {
+    setFilters({ userId: "", apiKeyId: "", status: "" });
+    setPagination((prev) => ({ ...prev, page: 1 }));
+  };
 
   return (
     <div className="flex min-w-0 flex-col gap-6">
@@ -83,13 +94,13 @@ export default function UsageLogsTab() {
             label="User ID"
             placeholder="usr_..."
             value={filters.userId}
-            onChange={(e) => setFilters((f) => ({ ...f, userId: e.target.value }))}
+            onChange={(e) => updateFilter("userId", e.target.value)}
           />
           <Input
             label="API Key ID"
             placeholder="key_..."
             value={filters.apiKeyId}
-            onChange={(e) => setFilters((f) => ({ ...f, apiKeyId: e.target.value }))}
+            onChange={(e) => updateFilter("apiKeyId", e.target.value)}
           />
           <div className="flex flex-col gap-1.5">
             <label htmlFor="bansos-status-filter" className="text-sm font-medium text-text-main">
@@ -98,7 +109,7 @@ export default function UsageLogsTab() {
             <select
               id="bansos-status-filter"
               value={filters.status}
-              onChange={(e) => setFilters((f) => ({ ...f, status: e.target.value }))}
+              onChange={(e) => updateFilter("status", e.target.value)}
               className={cn(
                 "h-9 px-3 rounded-lg border border-black/10 dark:border-white/10 bg-surface",
                 "text-sm text-text-main focus:outline-none focus:ring-2 focus:ring-primary/20 cursor-pointer"
@@ -194,7 +205,7 @@ export default function UsageLogsTab() {
                           size="sm"
                           disabled={expired || erasingId === audit.requestId}
                           loading={erasingId === audit.requestId}
-                          onClick={() => handleErase(audit.requestId)}
+                          onClick={() => setEraseTarget(audit)}
                         >
                           Erase
                         </Button>
@@ -219,6 +230,18 @@ export default function UsageLogsTab() {
           </div>
         )}
       </Card>
+
+      <ConfirmModal
+        isOpen={!!eraseTarget}
+        onClose={() => setEraseTarget(null)}
+        onConfirm={handleEraseConfirm}
+        title="Erase Prompt"
+        message="Erase the stored prompt text for this request? This cannot be undone."
+        confirmText="Erase"
+        cancelText="Cancel"
+        variant="danger"
+        loading={erasingId === eraseTarget?.requestId}
+      />
     </div>
   );
 }
