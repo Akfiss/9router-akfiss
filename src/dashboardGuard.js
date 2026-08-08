@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { getSettings, validateApiKey } from "@/lib/localDb";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
 import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
+import { isBansosHost, isAllowedBansosEndpoint, bansosError } from "@/lib/bansos/policy.js";
+import { verifyBansosKey, BANSOS_KEY_PREFIX } from "@/lib/bansos/keyService.js";
 
 const CLI_TOKEN_HEADER = "x-9r-cli-token";
 const CLI_TOKEN_SALT = "9r-cli-auth";
@@ -67,6 +69,11 @@ const PROTECTED_API_PATHS = [
 
 // Routes that spawn child processes or read host secrets — restrict to localhost.
 const LOCAL_ONLY_PATHS = [
+  // Bansos Gateway admin/observability API (Task 12) — local-only, and (since
+  // it isn't in PUBLIC_API_PATHS or PROTECTED_API_PATHS's public-LLM-API
+  // carve-outs) still falls through to the deny-by-default `/api/*` branch
+  // below, so it additionally requires a CLI token or dashboard auth.
+  "/api/bansos",
   "/api/cli-tools/cowork-settings",
   "/api/cli-tools/antigravity-mitm",
   "/api/mcp/",
@@ -130,7 +137,57 @@ function extractApiKey(request) {
 async function hasValidApiKey(request) {
   const apiKey = extractApiKey(request);
   if (!apiKey) return false;
+  // Bansos Gateway keys are a fully separate credential space (see
+  // src/lib/bansos/keyService.js) and must never authenticate through the
+  // ordinary sk-... key path, on any host — never even reach validateApiKey.
+  if (apiKey.startsWith(BANSOS_KEY_PREFIX)) return false;
   return await validateApiKey(apiKey);
+}
+
+// Converts a policy.bansosError() result (a plain object, not a Response)
+// into the NextResponse the middleware runtime expects.
+function respondWithBansosError(result) {
+  return NextResponse.json(result.body, { status: result.status, headers: result.headers });
+}
+
+// The Bansos Gateway's own narrow gate — entirely separate from the ordinary
+// dashboard/API/public-LLM-API logic below. Order matters: endpoint/method
+// allowlist is checked before authentication (matches the design's status
+// table), and only `Authorization: Bearer bns_...` is ever accepted here —
+// no x-api-key, no x-goog-api-key, no CLI token, no dashboard cookie, no
+// local-request exemption.
+async function handleBansosRequest(request) {
+  const { pathname } = request.nextUrl;
+
+  if (!isAllowedBansosEndpoint(request.method, pathname)) {
+    return respondWithBansosError(
+      bansosError(404, "Not found", "invalid_request_error", "not_found"),
+    );
+  }
+
+  const authHeader = request.headers.get("Authorization");
+  const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token || !token.startsWith(BANSOS_KEY_PREFIX)) {
+    return respondWithBansosError(
+      bansosError(401, "Missing or invalid API key", "invalid_request_error", "invalid_api_key"),
+    );
+  }
+
+  const result = await verifyBansosKey(token);
+  if (!result.ok) {
+    return respondWithBansosError(
+      bansosError(result.status, "Invalid API key", "invalid_request_error", result.code),
+    );
+  }
+
+  // Clone headers, strip the plaintext credential, stamp verified opaque IDs.
+  const headers = new Headers(request.headers);
+  headers.delete("authorization");
+  headers.delete("x-api-key");
+  headers.delete("x-goog-api-key");
+  headers.set("x-9r-bansos-user-id", result.user.id);
+  headers.set("x-9r-bansos-key-id", result.key.id);
+  return NextResponse.next({ request: { headers } });
 }
 
 async function canAccessPublicLlmApi(request) {
@@ -181,6 +238,14 @@ export const __test__ = {
 };
 
 export async function proxy(request) {
+  // Bansos Gateway public-host boundary — checked first, before anything
+  // else. A request to api.priaoslo.web.id must never fall through to the
+  // dashboard/API/local-only/ordinary-LLM-API logic below, regardless of
+  // what path it targets.
+  if (isBansosHost(request.headers.get("host"))) {
+    return handleBansosRequest(request);
+  }
+
   const { pathname } = request.nextUrl;
 
   // Local-only gate for spawn-capable / host-secret routes.

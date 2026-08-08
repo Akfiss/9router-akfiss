@@ -1,5 +1,6 @@
 import "open-sse/index.js";
 
+import crypto from "node:crypto";
 import {
   getProviderCredentials,
   markAccountUnavailable,
@@ -22,6 +23,172 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { isBansosHost, validateBansosModel, bansosError } from "@/lib/bansos/policy.js";
+import { PUBLIC_MODEL as BANSOS_PUBLIC_MODEL, INTERNAL_MODEL as BANSOS_INTERNAL_MODEL, BANSOS_LIMITS } from "@/lib/bansos/constants.js";
+import { acquireBansosChat } from "@/lib/bansos/rateLimiter.js";
+import { getBansosUserById } from "@/lib/db/index.js";
+import { startBansosPromptAudit, finalizeBansosPromptAudit } from "@/lib/bansos/promptAudit.js";
+
+const BANSOS_USER_ID_HEADER = "x-9r-bansos-user-id";
+const BANSOS_KEY_ID_HEADER = "x-9r-bansos-key-id";
+
+// Releases a Bansos rate-limiter lease exactly once, swallowing any error
+// from release() itself so it can never mask the real error/response being
+// returned. No-op when ctx is null/undefined (every ordinary, non-Bansos
+// request). Call this at EVERY exit point — from handleChat itself or from
+// dispatchSingleModelChat — that bails out before a streaming/non-streaming
+// handler has taken ownership of the response (Task 9 owns release from
+// that point on).
+function releaseBansosLease(ctx) {
+  if (!ctx) return;
+  try { ctx.release(); } catch { /* never mask the real error */ }
+}
+
+// Converts a policy.bansosError() result (a plain {status, body, headers}
+// object, not a Response) into a real Web Response. chat.js is not Next.js
+// middleware — there's no NextResponse here — so this mirrors
+// dashboardGuard.js's respondWithBansosError() but targets the raw Response
+// API, matching this file's own errorResponse()/unavailableResponse() style
+// (JSON body + Content-Type + CORS header).
+function bansosErrorResponse(result) {
+  return new Response(JSON.stringify(result.body), {
+    status: result.status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      ...(result.headers || {}),
+    },
+  });
+}
+
+/**
+ * Bansos Gateway pre-dispatch policy gate (Task 8). Only ever called when
+ * the caller has already confirmed `isBansosHost(request.headers.get("host"))`
+ * — see the note above handleChat for why gating on the Host header (never
+ * on the presence of the verified ID headers themselves) is load-bearing for
+ * security. Enforces, strictly in this order, all before any getModelInfo
+ * call or provider dispatch:
+ *   1. verified-ID headers present (stamped by dashboardGuard.js, Task 5)
+ *   2. the owning user exists and is active (Task 1's bansosRepo)
+ *   3. the emergency kill switch (settings.bansosGatewayEnabled !== false)
+ *   4. request body size (BANSOS_LIMITS.maxRequestBody)
+ *   5. prompt size (BANSOS_LIMITS.maxPromptSize; see task-8-report.md for
+ *      what "prompt" is defined to mean here)
+ *   6. the requested model is exactly the public Bansos model
+ *   7. the per-user rate + concurrency limiter (Task 6)
+ *
+ * On success, returns a deep-cloned (structuredClone) body with `model`
+ * rewritten to the internal dispatch model (never mutates the caller's
+ * original `body` — `clientRawRequest.body` still holds the untouched
+ * original for Task 10's prompt-audit feature) plus a ready-to-use
+ * bansosContext carrying the limiter's `release()` closure.
+ *
+ * @returns {Promise<{error: Response} | {body: object, context: object}>}
+ */
+async function resolveBansosChatRequest(request, body, settings) {
+  const userId = request.headers.get(BANSOS_USER_ID_HEADER);
+  const apiKeyId = request.headers.get(BANSOS_KEY_ID_HEADER);
+  if (!userId || !apiKeyId) {
+    // Structurally shouldn't happen — dashboardGuard.js's Bansos branch
+    // stamps both headers on every request it lets through — but treat
+    // absence as a hard, defensive 401 rather than assuming.
+    log.warn("BANSOS", "Missing verified identity headers on Bansos-host request");
+    return { error: bansosErrorResponse(bansosError(401, "Missing verified identity", "invalid_request_error", "missing_bansos_identity")) };
+  }
+
+  const user = await getBansosUserById(userId);
+  if (!user || !user.isActive) {
+    log.warn("BANSOS", "Rejected unknown/disabled user", { userId });
+    return { error: bansosErrorResponse(bansosError(403, "Account disabled", "invalid_request_error", "user_disabled")) };
+  }
+
+  if (settings.bansosGatewayEnabled === false) {
+    log.warn("BANSOS", "Gateway disabled via emergency kill switch");
+    return { error: bansosErrorResponse(bansosError(503, "Bansos gateway is temporarily disabled", "server_error", "gateway_disabled")) };
+  }
+
+  // Body-size guard: prefer the declared Content-Length (cheap, no need to
+  // touch the body); fall back to measuring the parsed body's re-serialized
+  // byte length when Content-Length is absent/non-numeric (chunked
+  // transfer, proxies that drop/rewrite it).
+  const declaredLength = Number(request.headers.get("content-length"));
+  let bodyByteLength = Number.isFinite(declaredLength) && declaredLength > 0 ? declaredLength : null;
+  if (bodyByteLength === null) {
+    try { bodyByteLength = Buffer.byteLength(JSON.stringify(body), "utf8"); } catch { bodyByteLength = 0; }
+  }
+  if (bodyByteLength > BANSOS_LIMITS.maxRequestBody) {
+    log.warn("BANSOS", `Request body too large: ${bodyByteLength} bytes`);
+    return { error: bansosErrorResponse(bansosError(413, "Request body too large", "invalid_request_error", "request_too_large")) };
+  }
+
+  // Prompt-size guard. "Prompt" is interpreted as the serialized `messages`
+  // array specifically (not the whole body) — it's the field whose size is
+  // actually driven by user-supplied conversation content, as opposed to
+  // fixed/small fields like `model`/`stream`/`temperature`. See
+  // task-8-report.md for this interpretation call.
+  let promptByteLength = 0;
+  try { promptByteLength = Buffer.byteLength(JSON.stringify(body?.messages || []), "utf8"); } catch { promptByteLength = 0; }
+  if (promptByteLength > BANSOS_LIMITS.maxPromptSize) {
+    log.warn("BANSOS", `Prompt too large: ${promptByteLength} bytes`);
+    return { error: bansosErrorResponse(bansosError(413, "Prompt too large", "invalid_request_error", "prompt_too_large")) };
+  }
+
+  if (!validateBansosModel(body?.model)) {
+    log.warn("BANSOS", "Invalid model requested", { model: body?.model });
+    return { error: bansosErrorResponse(bansosError(400, "Unsupported model", "invalid_request_error", "invalid_model")) };
+  }
+
+  const lease = acquireBansosChat(user.id, {
+    requestsPerMinute: user.requestsPerMinute,
+    maxConcurrentRequests: user.maxConcurrentRequests,
+  });
+  if (!lease.ok) {
+    const isRpm = lease.reason === "rpm_limit_exceeded";
+    const message = isRpm ? "Rate limit exceeded" : "Too many concurrent requests";
+    const extraHeaders = lease.retryAfterSeconds != null ? { "Retry-After": String(lease.retryAfterSeconds) } : undefined;
+    log.warn("BANSOS", `Rate limiter rejected request: ${lease.reason}`, { userId: user.id });
+    return { error: bansosErrorResponse(bansosError(429, message, "rate_limit_error", lease.reason, extraHeaders)) };
+  }
+
+  // Deep-clone, not shallow: a shallow `{ ...body, model }` still shares
+  // `body.messages` (and every message/tool_call object inside it) by
+  // reference with `clientRawRequest.body`, which Task 10's prompt-audit
+  // feature relies on staying pristine. Ordinary dispatch mutates messages
+  // in place further downstream on every request — e.g.
+  // open-sse/translator/index.js's translateRequest() starts from
+  // `let result = body` (no clone) and its normalizeThinkingConfig()/
+  // ensureToolCallIds() helpers mutate fields on those same message/
+  // tool_call objects in place, and RTK's compressMessages() mutates
+  // message content in place when rtkEnabled — so without a deep clone
+  // here, the very first ordinary translation pass would silently corrupt
+  // the "preserved original" Task 10 expects to read from
+  // clientRawRequest.body later. structuredClone is already an established
+  // convention in this codebase (see open-sse/executors/kiro.js,
+  // open-sse/executors/antigravity.js).
+  const internalBody = { ...structuredClone(body), model: BANSOS_INTERNAL_MODEL };
+
+  const context = {
+    userId: user.id,
+    apiKeyId,
+    requestId: crypto.randomUUID(),
+    publicModel: BANSOS_PUBLIC_MODEL,
+    internalModel: BANSOS_INTERNAL_MODEL,
+    release: lease.release,
+    startedAt: Date.now(),
+  };
+
+  // Task 10: start the seven-day prompt-audit row now that the policy gate
+  // has fully accepted this request — every earlier `return { error }` above
+  // (missing identity, disabled user, kill switch, body/prompt too large,
+  // invalid model, rate-limit rejection) never reaches here, so none of
+  // those rejections get an audit row (nothing to audit — they never reach
+  // a provider). Pass the ORIGINAL, pre-rewrite `body` (public model name +
+  // untouched messages), NOT `internalBody`. Fire-and-forget, fail-open —
+  // never throws, never delays this return.
+  startBansosPromptAudit(context, body);
+
+  return { body: internalBody, context };
+}
 
 /**
  * Handle chat completion request
@@ -37,7 +204,12 @@ export async function handleChat(request, clientRawRequest = null) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid JSON body");
   }
 
-  // Build clientRawRequest for logging (if not provided)
+  // Build clientRawRequest for logging (if not provided). Captured from the
+  // ORIGINAL, pre-Bansos-rewrite `body` reference — this is also what
+  // preserves the original client-submitted body (public model name intact)
+  // for Task 10's prompt-audit feature, since `body` itself gets reassigned
+  // to a rewritten clone below for a Bansos request, but clientRawRequest.body
+  // keeps pointing at the object captured here.
   if (!clientRawRequest) {
     const url = new URL(request.url);
     clientRawRequest = {
@@ -46,6 +218,29 @@ export async function handleChat(request, clientRawRequest = null) {
       headers: Object.fromEntries(request.headers.entries())
     };
   }
+
+  const settings = await getSettings();
+
+  // --- Bansos Gateway branch --------------------------------------------
+  // Gate strictly on the Host header via isBansosHost(), NEVER on the mere
+  // presence of x-9r-bansos-user-id/x-9r-bansos-key-id. Those two headers
+  // are only trustworthy because dashboardGuard.js's Bansos-host branch
+  // (Task 5) is the ONLY code path that stamps them, after verifying a
+  // bns_... key — and that guarantee holds only when the request actually
+  // arrived on the Bansos host. dashboardGuard.js's *ordinary* path calls
+  // NextResponse.next() with no arguments, which forwards the client's
+  // original headers completely unmodified, so on an ordinary local host a
+  // client could forge these exact header names itself. Gating on Host
+  // first means a forged-header local request can never reach this branch.
+  let bansosContext = null;
+  const onBansosHost = isBansosHost(request.headers.get("host"));
+  if (onBansosHost) {
+    const outcome = await resolveBansosChatRequest(request, body, settings);
+    if (outcome.error) return outcome.error;
+    body = outcome.body;
+    bansosContext = outcome.context;
+  }
+
   const modelStr = body.model;
 
   // Request summary is emitted as the unified "▶" line in chatCore (has fmt/thinking/account)
@@ -60,9 +255,11 @@ export async function handleChat(request, clientRawRequest = null) {
     log.debug("AUTH", "No API key provided (local mode)");
   }
 
-  // Enforce API key if enabled in settings
-  const settings = await getSettings();
-  if (settings.requireApiKey) {
+  // Enforce API key if enabled in settings. Bansos requests authenticate
+  // through a completely separate, already-verified credential space
+  // (dashboardGuard.js + resolveBansosChatRequest above) — they must never
+  // also be gated by the ordinary sk-... key check.
+  if (!onBansosHost && settings.requireApiKey) {
     if (!apiKey) {
       log.warn("AUTH", "Missing API key (requireApiKey=true)");
       return errorResponse(HTTP_STATUS.UNAUTHORIZED, "Missing API key");
@@ -82,7 +279,29 @@ export async function handleChat(request, clientRawRequest = null) {
   // Bypass naming/warmup requests before combo rotation to avoid wasting rotation slots
   const userAgent = request?.headers?.get("user-agent") || "";
   const bypassResponse = handleBypassRequest(body, modelStr, userAgent, !!settings.ccFilterNaming);
-  if (bypassResponse) return bypassResponse.response || bypassResponse;
+  if (bypassResponse) {
+    releaseBansosLease(bansosContext);
+    // Terminal for the prompt-audit row too: a bypass short-circuit never
+    // reaches a provider, and its synthesized response carries an implicit
+    // 200 (see open-sse/utils/bypassHandler.js's createStreamingResponse/
+    // createNonStreamingResponse — neither sets an explicit status). Without
+    // this, a Bansos request whose (client-controlled) User-Agent/content
+    // trips the bypass check would leave its audit row stuck at "pending"
+    // forever — this call site was NOT in Task 10's original enumerated
+    // list of releaseBansosLease() sites (that list covered dispatchSingleModelChat
+    // + handleSingleModelChat only), found instead by grepping this whole
+    // file for every releaseBansosLease( call.
+    finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200 });
+    return bypassResponse.response || bypassResponse;
+  }
+
+  // Bansos requests are pinned to a single fixed internal model end-to-end —
+  // never let one fall through into combo/fusion/capacity-adapter expansion,
+  // which could otherwise dispatch it against a model other than the one
+  // resolveBansosChatRequest already rewrote body.model to.
+  if (bansosContext) {
+    return handleSingleModelChat(body, BANSOS_INTERNAL_MODEL, clientRawRequest, request, apiKey, bansosContext);
+  }
 
   const requiredCapabilities = detectRequiredCapabilities(body);
 
@@ -107,7 +326,7 @@ export async function handleChat(request, clientRawRequest = null) {
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, bansosContext);
         },
         log,
         comboName: modelStr,
@@ -122,7 +341,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, bansosContext),
         adapterAdded
       ),
       log,
@@ -142,7 +361,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, bansosContext),
         adapterAdded
       ),
       log,
@@ -151,13 +370,37 @@ export async function handleChat(request, clientRawRequest = null) {
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey);
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext);
 }
 
 /**
- * Handle single model chat request
+ * Handle single model chat request. `bansosContext` is threaded through
+ * additively (Task 8) — undefined/null for every ordinary request, in which
+ * case this function behaves exactly as before. It is never stored in
+ * module-level state: concurrent requests/streams each carry their own
+ * instance as a plain parameter.
+ *
+ * This is a thin safety-net wrapper: it guarantees the Bansos rate-limiter
+ * lease (if any) is released on ANY exception thrown out of dispatch,
+ * whatever the cause, as a defense-in-depth backstop on top of the explicit
+ * release-before-return calls inside dispatchSingleModelChat below. It does
+ * NOT release on success — a successful hand-off is Task 9's to release.
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, bansosContext = null) {
+  try {
+    return await dispatchSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext);
+  } catch (err) {
+    releaseBansosLease(bansosContext);
+    // Unhandled exception surfaces uncaught out of handleChat — Next.js's
+    // route-handler wrapper turns that into a bare 500 (no route in this
+    // codebase wraps handleChat in its own try/catch; see route.js files
+    // under src/app/api/v1*/), so 500 is the accurate httpStatus here.
+    finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: 500, errorCategory: "dispatch_exception" });
+    throw err;
+  }
+}
+
+async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -184,7 +427,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, bansosContext);
           },
           log,
           comboName: modelStr,
@@ -199,7 +442,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, bansosContext),
           adapterAdded
         ),
         log,
@@ -209,6 +452,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
+    releaseBansosLease(bansosContext);
+    finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: HTTP_STATUS.BAD_REQUEST, errorCategory: "invalid_model_format" });
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
   }
 
@@ -233,13 +478,19 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
+        releaseBansosLease(bansosContext);
+        finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: status, errorCategory: "accounts_rate_limited" });
         return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
+        releaseBansosLease(bansosContext);
+        finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: HTTP_STATUS.NOT_FOUND, errorCategory: "no_credentials" });
         return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
       }
       log.warn("CHAT", "No more accounts available", { provider });
+      releaseBansosLease(bansosContext);
+      finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, errorCategory: "no_more_accounts" });
       return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
     }
 
@@ -295,9 +546,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
-      }
+      },
+      bansosContext
     });
 
+    // A successful hand-off means handleChatCore already routed the request
+    // into one of chatCore/{sseToJsonHandler,nonStreamingHandler,streamingHandler}.js
+    // — those own the bansosContext release from here on (Task 9), not us.
     if (result.success) return result.response;
 
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
@@ -311,6 +566,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       continue;
     }
 
+    // No further fallback: this was a pre-response failure from this
+    // client's point of view (no handler ever took ownership) — release now.
+    releaseBansosLease(bansosContext);
+    finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: result.status, errorCategory: "fallback_exhausted" });
     return result.response;
   }
 }

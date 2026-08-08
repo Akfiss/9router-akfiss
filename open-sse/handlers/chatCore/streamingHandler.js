@@ -5,8 +5,9 @@ import { pipeWithDisconnect } from "../../utils/streamHandler.js";
 import { PROVIDERS } from "../../config/providers.js";
 import { STREAM_STALL_TIMEOUT_MS } from "../../config/runtimeConfig.js";
 import { buildAbortedResponsesTerminalBytes } from "../../utils/responsesStreamHelpers.js";
-import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
+import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine, buildBansosUsageMeta } from "./requestDetail.js";
 import { saveRequestDetail } from "@/lib/usageDb.js";
+import { finalizeBansosPromptAudit } from "@/lib/bansos/promptAudit.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
 
 // Codex returns Responses API SSE → which client format to translate INTO, by request sourceFormat.
@@ -41,9 +42,123 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 }
 
 /**
+ * Wrap a streamController (see open-sse/utils/streamHandler.js's
+ * createStreamController) so a Bansos request's concurrency lease is
+ * released whenever the stream actually ends — success, error, disconnect,
+ * or stall-timeout — none of which have a single synchronous completion
+ * point the way the non-streaming handlers do.
+ *
+ * `handleComplete` fires on the normal end-of-stream path — the SAME path
+ * that *usually* already ran `onStreamComplete` (via the transform stream's
+ * flush(), see open-sse/utils/stream.js) and wrote the success usageHistory
+ * row. But flush()'s entire body — including both call sites of
+ * onStreamComplete — is wrapped in a try/catch that swallows without
+ * rethrowing: if anything throws before reaching onStreamComplete (e.g. a
+ * translator/parser exception on a malformed final chunk from any
+ * upstream), flush() still returns normally, the stream still closes, and
+ * handleComplete() still fires — but onStreamComplete never ran and no row
+ * was ever written for an otherwise successfully-served request. `handleComplete`
+ * therefore checks `completionState` (the marker `buildOnStreamComplete`'s
+ * `onStreamComplete` sets the moment it actually runs — passed in here via
+ * `onStreamComplete.completionState`, since chatCore.js threads the exact
+ * same `onStreamComplete` function, unmodified, into `handleStreamingResponse`)
+ * and falls back to writing the same "interrupted / tokens unavailable" row
+ * the error/disconnect paths use, rather than silently leaving zero rows.
+ *
+ * `handleError`/`handleDisconnect` fire on every path that does NOT go
+ * through flush()/onStreamComplete (upstream error, client disconnect,
+ * stall-timeout abort). These never get a chance to write a usageHistory
+ * row otherwise, so the wrapped versions write one here — status
+ * "interrupted", tokens zeroed (the DB's numeric columns aren't nullable in
+ * practice, but the row is NOT a claim of "confirmed zero tokens" — meta
+ * carries `tokensUnavailable: true` specifically so a reader can tell that
+ * apart from a genuine zero-token request) — then release.
+ *
+ * A local `finalized` flag guards the "at most one usageHistory row per
+ * request" invariant, and this wrapper enforces it ITSELF rather than
+ * relying on createStreamController's internal `disconnected` guard: that
+ * flag only protects the RAW controller's own side effects (logging,
+ * onDisconnect/onError callback invocation) from double-firing — it does
+ * nothing for side effects layered on top of it here. `finalized` is set by
+ * WHICHEVER of handleComplete/handleError/handleDisconnect runs first, and
+ * all three check it before doing any usageHistory-row work, so a
+ * handleComplete followed by a late handleError/handleDisconnect (or any
+ * other ordering) can never append a second row for the same request.
+ * (Today's plumbing happens to make a same-request double-fire unreachable
+ * in practice — controller.close() runs synchronously right after
+ * handleComplete(), a .cancel() on an already-closed stream is a spec
+ * no-op, and the stall timer is cleared before flush() runs — but that's an
+ * implicit runtime guarantee elsewhere, not something this wrapper's own
+ * code enforced before; it does now.)
+ * `release()` itself is already idempotent (rateLimiter.js), so it needs no
+ * such guard — calling it more than once is harmless.
+ *
+ * Exported for direct unit testing — see tests/unit/bansos-usage-attribution.test.js.
+ *
+ * @param {object} completionState - shared per-request marker returned by
+ *   `buildOnStreamComplete` (`{ completed: boolean }`), or undefined. When
+ *   undefined/`completed` is falsy, handleComplete safely assumes
+ *   onStreamComplete has NOT run and writes the fallback row.
+ */
+export function wrapStreamControllerForBansos(streamController, bansosContext, { provider, model, connectionId, apiKey, endpoint }, completionState) {
+  let finalized = false;
+
+  const writeInterruptedRow = () => {
+    saveUsageStats({
+      provider, model, connectionId, apiKey, endpoint,
+      tokens: { prompt_tokens: 0, completion_tokens: 0 },
+      status: "interrupted",
+      meta: buildBansosUsageMeta(bansosContext, { tokensUnavailable: true }),
+      label: "STREAM USAGE",
+      silent: true,
+    });
+    // Task 10: finalize the prompt-audit row alongside the usageHistory
+    // write above — this helper already runs under the `finalized` guard
+    // (called only once, from whichever of handleError/handleDisconnect/the
+    // completionState-missing fallback in handleComplete fires first), so
+    // this is naturally exactly-once per request with no new guard needed.
+    finalizeBansosPromptAudit(bansosContext, { status: "interrupted" });
+  };
+
+  const finalizeInterrupted = () => {
+    if (finalized) return;
+    finalized = true;
+    writeInterruptedRow();
+  };
+
+  return {
+    ...streamController,
+    handleError: (err) => {
+      streamController.handleError(err);
+      finalizeInterrupted();
+      bansosContext.release();
+    },
+    handleDisconnect: (reason) => {
+      streamController.handleDisconnect(reason);
+      finalizeInterrupted();
+      bansosContext.release();
+    },
+    handleComplete: () => {
+      streamController.handleComplete();
+      if (!finalized) {
+        finalized = true;
+        // Normal success path already wrote a usageHistory row via
+        // onStreamComplete — UNLESS flush() swallowed an exception before
+        // ever reaching it (see the JSDoc above). Missing/false
+        // completionState.completed means "assume it did NOT run" — the
+        // safe default, since silently ending up with zero rows is worse
+        // than a flagged "unavailable" one.
+        if (!completionState?.completed) writeInterruptedRow();
+      }
+      bansosContext.release();
+    },
+  };
+}
+
+/**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
-export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log }) {
+export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log, bansosContext }) {
   if (onRequestSuccess) {
     Promise.resolve()
       .then(onRequestSuccess)
@@ -85,7 +200,20 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const onAbortTerminal = isResponsesPassthrough ? buildAbortedResponsesTerminalBytes : null;
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
-  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+
+  // Bansos requests: wrap the controller so error/disconnect/stall-timeout
+  // (which never reach onStreamComplete/flush()) still write an interrupted
+  // usageHistory row and release the lease. Ordinary requests get the exact
+  // same `streamController` reference untouched — no new behavior for them.
+  // `onStreamComplete.completionState` is the shared marker buildOnStreamComplete
+  // attached to the SAME onStreamComplete function chatCore.js threads in
+  // here unmodified — see wrapStreamControllerForBansos's JSDoc for why
+  // handleComplete needs it (Finding 1: flush() can swallow an exception
+  // before ever calling onStreamComplete).
+  const effectiveStreamController = bansosContext
+    ? wrapStreamControllerForBansos(streamController, bansosContext, { provider, model, connectionId, apiKey, endpoint: clientRawRequest?.endpoint }, onStreamComplete?.completionState)
+    : streamController;
+  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, effectiveStreamController, onAbortTerminal, stallTimeoutMs);
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
@@ -110,8 +238,20 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 /**
  * Build onStreamComplete callback for streaming usage tracking.
  */
-export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log }) {
+export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log, bansosContext }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+
+  // Shared, per-request completion marker (Finding 1 fix, task-9 review
+  // round 1) — a fresh plain object per call, never module-global. Set to
+  // `true` the moment this callback actually runs and calls saveUsageStats
+  // below. wrapStreamControllerForBansos's handleComplete reads this (via
+  // `onStreamComplete.completionState`, attached below) to distinguish "the
+  // transform stream's flush() (open-sse/utils/stream.js) ran to completion
+  // AND reached onStreamComplete" from "flush() ran to completion but
+  // swallowed an exception before ever reaching onStreamComplete" — the
+  // latter would otherwise silently produce zero usageHistory rows for an
+  // already-served request.
+  const completionState = { completed: false };
 
   const onStreamComplete = (contentObj, usage, ttftAt) => {
     const latency = {
@@ -136,9 +276,38 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
     });
 
     // Persist stream usage to DB (no console line; the "📊 done" line below is authoritative)
-    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, label: "STREAM USAGE", silent: true });
+    saveUsageStats({
+      provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, label: "STREAM USAGE", silent: true,
+      meta: buildBansosUsageMeta(bansosContext), status: bansosContext ? "success" : undefined
+    });
+    // Mark that onStreamComplete actually ran and wrote its row — see the
+    // completionState JSDoc above. Set unconditionally (not just for
+    // Bansos) since it's harmless for ordinary requests and keeps this one
+    // flag meaning one thing: "saveUsageStats above was reached."
+    completionState.completed = true;
+    // Task 10: finalize the prompt-audit row at this same success point —
+    // guarded by the same completionState/finalized machinery Task 9 built
+    // (this only runs once per request on the real success path; a later
+    // handleComplete/handleError/handleDisconnect in
+    // wrapStreamControllerForBansos sees completionState.completed:true and
+    // skips writing its own interrupted row).
+    finalizeBansosPromptAudit(bansosContext, { status: "success", tokens: usage, durationMs: latency.total, ttftMs: latency.ttft });
     if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency }));
+
+    // Success completion point for a Bansos lease. This fires from the
+    // transform stream's flush() — the normal end-of-stream path.
+    // wrapStreamControllerForBansos's handleComplete also calls release()
+    // after this fires (release() is idempotent, so that's a no-op, not a
+    // double-release bug) and, as of the Finding 1/2 fixes, checks
+    // `completionState.completed` (set immediately above) plus its own
+    // `finalized` guard before deciding whether it needs to write a
+    // fallback row itself — see wrapStreamControllerForBansos's JSDoc for
+    // the full ordering contract this and that function now jointly
+    // enforce (previously just assumed from unrelated Streams-runtime
+    // behavior, not actually guaranteed by this code).
+    if (bansosContext) bansosContext.release();
   };
 
-  return { onStreamComplete, streamDetailId };
+  onStreamComplete.completionState = completionState;
+  return { onStreamComplete, streamDetailId, completionState };
 }

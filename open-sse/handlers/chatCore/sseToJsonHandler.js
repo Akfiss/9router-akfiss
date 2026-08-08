@@ -3,7 +3,8 @@ import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
 import { PROVIDERS } from "../../config/providers.js";
-import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine } from "./requestDetail.js";
+import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLine, buildBansosUsageMeta } from "./requestDetail.js";
+import { finalizeBansosPromptAudit } from "@/lib/bansos/promptAudit.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 
 // Responses-API providers (e.g. codex) may emit SSE without content-type + use Responses output shape
@@ -179,12 +180,17 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log }) {
+export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, reqTag, log, bansosContext }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
 
   trackDone();
+
+  // Built once, reused by both branches below. undefined when bansosContext
+  // is absent, so ordinary (non-Bansos) calls pass meta:undefined straight
+  // through to saveUsageStats/saveRequestUsage — byte-for-byte unchanged.
+  const bansosMeta = buildBansosUsageMeta(bansosContext);
 
   const ctx = {
     provider, model, connectionId,
@@ -204,7 +210,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       const usage = jsonResponse.usage || {};
       appendLog({ tokens: usage, status: "200 OK" });
-      saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
+      saveUsageStats({
+        provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true,
+        meta: bansosMeta, status: bansosContext ? "success" : undefined
+      });
       if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
       // Same cache-inclusive total for the recorded detail, so the DB and the
@@ -225,6 +234,15 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       // Client is Responses API → return as-is
       if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
+        // Terminal success exit — see the longer note above the standard
+        // Chat Completions success return below for why release() is
+        // scoped to success returns only, not a blanket finally.
+        if (bansosContext) bansosContext.release();
+        // Task 10: finalize the prompt-audit row alongside release() — this
+        // handler (grok-cli's forceStream:true routes here for any Bansos
+        // client sending stream:false; see chatCore.js's
+        // !clientRequestedStreaming && providerRequiresStreaming branch).
+        finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200, tokens: usage, durationMs: totalLatency });
         return { success: true, response: new Response(JSON.stringify(jsonResponse), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
       }
 
@@ -281,14 +299,35 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         };
       }
 
+      if (bansosContext) bansosContext.release();
+      finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200, tokens: usage, durationMs: totalLatency });
       return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
+      // Not a release point: an exception here (e.g. malformed upstream
+      // SSE) surfaces as success:false via createErrorResult, which flows
+      // back into chat.js's account-fallback loop — same
+      // shouldFallback:true-for-everything reasoning as the standard SSE
+      // path's error returns below. Task 8's fallback loop / chat.js's
+      // outer catch owns release for this path.
       console.error("[ChatCore] Responses API SSE→JSON failed:", err);
       return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
     }
   }
 
   // Standard Chat Completions SSE path
+  //
+  // NOTE on bansosContext.release() placement in this branch: the two
+  // `createErrorResult(HTTP_STATUS.BAD_GATEWAY, ...)` returns immediately
+  // below (invalid/errored upstream SSE) are NOT release points. They flow
+  // back into dispatchSingleModelChat's account-fallback loop
+  // (src/sse/handlers/chat.js), which calls markAccountUnavailable() ->
+  // checkFallbackError() (open-sse/services/accountFallback.js) — confirmed
+  // that function returns `shouldFallback: true` unconditionally for every
+  // status/error it's given (matched rule or the unmatched default both
+  // return true), so these errors CAN and do trigger an internal retry with
+  // a different provider account under the SAME bansosContext/lease.
+  // Releasing here would free the user's concurrency slot mid-retry. Only
+  // the true terminal success return at the bottom of this branch releases.
   try {
     const sseText = await providerResponse.text();
     const parsed = parseSSEToOpenAIResponse(sseText, model);
@@ -304,7 +343,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
     const usage = parsed.usage || {};
     appendLog({ tokens: usage, status: "200 OK" });
-    saveUsageStats({ provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true });
+    saveUsageStats({
+      provider, model, tokens: usage, connectionId, apiKey, endpoint: clientRawRequest?.endpoint, silent: true,
+      meta: bansosMeta, status: bansosContext ? "success" : undefined
+    });
     if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
     const totalLatency = Date.now() - requestStartTime;
@@ -351,8 +393,13 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       ? chatCompletionToResponses(parsed, customToolNames)
       : parsed;
 
+    if (bansosContext) bansosContext.release();
+    finalizeBansosPromptAudit(bansosContext, { status: "success", httpStatus: 200, tokens: usage, durationMs: totalLatency });
     return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
+    // Not a release point — see the note above the try block: this path's
+    // errors are all BAD_GATEWAY/success:false, which chat.js's
+    // account-fallback loop can retry under the same lease.
     console.error("[ChatCore] Chat Completions SSE→JSON failed:", err);
     return createErrorResult(HTTP_STATUS.BAD_GATEWAY, "Failed to convert streaming response to JSON");
   }

@@ -118,6 +118,13 @@ async function runHeavyStartup() {
   import("@/sse/services/backgroundTokenRefresh.js")
     .then(({ startBackgroundTokenRefresh }) => startBackgroundTokenRefresh())
     .catch((e) => console.log("[BackgroundTokenRefresh] scheduler start failed:", e.message));
+
+  // Bansos Gateway prompt-audit retention sweep (7-day policy). Module is
+  // idempotent; cleanup errors are logged and swallowed so they never abort
+  // app bootstrap.
+  import("@/lib/bansos/retention.js")
+    .then(({ startBansosRetention }) => startBansosRetention())
+    .catch((e) => console.log("[BansosRetention] scheduler start failed:", e.message));
 }
 
 function hasQuotaAutoPingEnabled(settings) {

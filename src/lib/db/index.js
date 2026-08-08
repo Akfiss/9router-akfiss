@@ -67,6 +67,16 @@ export {
   saveRequestDetail, getRequestDetails, getRequestDetailById, getDistinctProviders,
 } from "./repos/requestDetailsRepo.js";
 
+// Bansos Gateway (public API gateway) — users, API keys, prompt audit
+export {
+  createBansosUser, listBansosUsers, getBansosUserById, updateBansosUser,
+  createBansosKeyRecord, getBansosKeyByHash, listBansosKeysByUser,
+  revokeBansosKey, rotateBansosKeyRecord, touchBansosKeyLastUsed,
+  insertBansosPromptAudit, finalizeBansosPromptAudit, listBansosPromptAudits,
+  eraseBansosPrompt, clearExpiredBansosPrompts,
+  getBansosUsageBreakdown, getBansosUsageTotalsAcrossUsers,
+} from "./repos/bansosRepo.js";
+
 // Export/import full DB
 export async function exportDb() {
   const db = await getAdapter();

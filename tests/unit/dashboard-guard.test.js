@@ -5,16 +5,23 @@ const mocks = vi.hoisted(() => ({
   jsonResponse: vi.fn((body, init) => ({
     status: init?.status || 200,
     body,
+    headers: init?.headers,
   })),
+  // NextResponse.next() with no argument keeps the existing identity-stable
+  // sentinel (15+ tests below assert strict `toBe(mocks.nextResponse)`).
+  // Called WITH an argument (the Bansos branch's `{ request: { headers } }`),
+  // it returns the argument itself so a test can inspect what was forwarded.
+  nextFn: vi.fn((init) => (init === undefined ? mocks.nextResponse : init)),
   getSettings: vi.fn(),
   validateApiKey: vi.fn(),
   getConsistentMachineId: vi.fn(),
   verifyDashboardAuthToken: vi.fn(),
+  verifyBansosKey: vi.fn(),
 }));
 
 vi.mock("next/server", () => ({
   NextResponse: {
-    next: vi.fn(() => mocks.nextResponse),
+    next: mocks.nextFn,
     json: mocks.jsonResponse,
     redirect: vi.fn((url) => ({ status: 307, url })),
   },
@@ -33,15 +40,24 @@ vi.mock("@/lib/auth/dashboardSession", () => ({
   verifyDashboardAuthToken: mocks.verifyDashboardAuthToken,
 }));
 
+// dashboardGuard.js imports keyService.js at module scope for the Bansos
+// branch; mock it here too (even though none of these non-Bansos-host tests
+// exercise it) so the module doesn't try to load the real DB layer at import.
+vi.mock("@/lib/bansos/keyService.js", () => ({
+  verifyBansosKey: mocks.verifyBansosKey,
+  BANSOS_KEY_PREFIX: "bns_",
+}));
+
 const { proxy, __test__ } = await import("../../src/dashboardGuard.js");
 
-function request(pathname, headers = {}) {
+function request(pathname, headers = {}, method = "GET") {
   const normalizedHeaders = new Headers(headers);
   return {
     nextUrl: { pathname, searchParams: new URL(`http://localhost${pathname}`).searchParams },
     headers: normalizedHeaders,
     cookies: { get: vi.fn(() => undefined) },
     url: `http://localhost${pathname}`,
+    method,
   };
 }
 
@@ -275,5 +291,63 @@ describe("dashboard guard helpers", () => {
     });
 
     expect(__test__.extractApiKey(apiRequest)).toBe("header-key");
+  });
+});
+
+// A `bns_...` key belongs to a fully separate credential space (Bansos
+// Gateway) and must never authenticate through the ordinary sk-... key path,
+// even on a host that isn't api.priaoslo.web.id — see keyService.js's header
+// comment. `validateApiKey` must never even see it.
+describe("dashboard guard blocks Bansos-shaped keys from the ordinary key path", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getSettings.mockResolvedValue({ requireLogin: true });
+    mocks.getConsistentMachineId.mockResolvedValue("cli-token");
+    mocks.verifyDashboardAuthToken.mockResolvedValue(false);
+  });
+
+  it("rejects a bns_ bearer token on an ordinary remote host without calling validateApiKey", async () => {
+    const response = await proxy(request("/v1/chat/completions", {
+      host: "router.example.com",
+      authorization: "Bearer bns_shouldnotworkherea1b2c3d4e5f60000000000000000",
+    }));
+
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("API key required for remote API access");
+    expect(mocks.validateApiKey).not.toHaveBeenCalled();
+  });
+
+  it("rejects a bns_ key supplied via x-api-key on an ordinary remote host", async () => {
+    const response = await proxy(request("/v1/chat/completions", {
+      host: "router.example.com",
+      "x-api-key": "bns_shouldnotworkherea1b2c3d4e5f60000000000000000",
+    }));
+
+    expect(response.status).toBe(401);
+    expect(mocks.validateApiKey).not.toHaveBeenCalled();
+  });
+
+  it("still allows an ordinary sk-... bearer key on the same remote host (unchanged behavior)", async () => {
+    mocks.validateApiKey.mockResolvedValue(true);
+
+    const response = await proxy(request("/v1/chat/completions", {
+      host: "router.example.com",
+      authorization: "Bearer sk-ordinary-key",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+    expect(mocks.validateApiKey).toHaveBeenCalledWith("sk-ordinary-key");
+  });
+
+  it("still allows a valid x-goog-api-key on the same remote host (unchanged behavior)", async () => {
+    mocks.validateApiKey.mockResolvedValue(true);
+
+    const response = await proxy(request("/v1beta/models", {
+      host: "router.example.com",
+      "x-goog-api-key": "sk-valid-google",
+    }));
+
+    expect(response).toBe(mocks.nextResponse);
+    expect(mocks.validateApiKey).toHaveBeenCalledWith("sk-valid-google");
   });
 });

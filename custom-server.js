@@ -40,6 +40,11 @@ function startBackgroundTokenRefreshFromCustomServer() {
 // Wrap Next standalone HTTP server: derive client IP from the TCP socket
 // (unspoofable) and strip client-supplied forwarding headers so downstream
 // rate-limiting keys on the real peer address instead of attacker-controlled XFF.
+// Also security-load-bearing for the Bansos Gateway: deleting
+// x-forwarded-host below prevents a client from spoofing the Host the
+// Bansos public-host gate trusts (isBansosHost() in
+// src/sse/handlers/chat.js / src/dashboardGuard.js reads the Host header
+// directly, never x-forwarded-host).
 http.createServer = (...args) => {
   const handler = args.find((a) => typeof a === "function");
   const rest = args.filter((a) => typeof a !== "function");
@@ -56,6 +61,7 @@ http.createServer = (...args) => {
     const ip = isLoopbackProxy && proxyIp ? proxyIp : socketIp;
     delete req.headers["x-9r-real-ip"];
     delete req.headers["x-forwarded-for"];
+    delete req.headers["x-forwarded-host"];
     delete req.headers["x-9r-via-proxy"];
     req.headers["x-9r-real-ip"] = ip;
     if (viaProxy) req.headers["x-9r-via-proxy"] = "1";
