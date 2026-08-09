@@ -51,6 +51,36 @@ adds confusion when debugging.
   `http://127.0.0.1:20127` — see the port note immediately below before you
   copy any command verbatim.
 
+### Windows build note — `npm run build` aborts with EPERM
+
+On Windows, `next build` can die before it compiles anything:
+
+```
+glob error [Error: EPERM: operation not permitted, scandir 'C:\Users\<you>\Application Data']
+unhandledRejection [Error: EPERM: operation not permitted, scandir 'C:\Users\<you>\AppData\Local\Application Data']
+```
+
+This is not a code error. Next's file tracer (`@vercel/nft`) statically
+evaluates the `os.homedir()` calls this codebase uses to locate `~/.9router`
+(`src/lib/dataDir.js`, `src/mitm/paths.js`, the OAuth auto-import routes),
+cannot resolve the rest of those paths, and falls back to globbing the whole
+home directory. That walk hits `Application Data` — a legacy compatibility
+junction that always denies access — and the rejection is unhandled.
+
+Point `USERPROFILE` at an empty directory for the build only. Tracing then
+scans that directory instead; nothing in the build output depends on the real
+home, and the running server still uses the real one:
+
+```powershell
+$empty = "$env:TEMP\9router-build-home"
+New-Item -ItemType Directory -Force -Path $empty | Out-Null
+$env:USERPROFILE = $empty; $env:HOME = $empty
+npm run build
+```
+
+Run `npm run start` from a *fresh* shell so the server sees the real
+`USERPROFILE` again — `~/.9router` holds usage logs and MITM state.
+
 ### Port note — confirm before proceeding
 
 This repo's own `npm run start` script hardcodes `next start --port 20127`

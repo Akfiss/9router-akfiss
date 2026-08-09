@@ -8,12 +8,11 @@ const tracingRoot = process.env.NEXT_TRACING_ROOT_MODE === "workspace"
   ? join(projectRoot, "..")
   : projectRoot;
 const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE || "128mb";
-// `../../**/*` makes glob enumerate everything two levels above the project just to
-// exclude it. When the checkout sits near a drive root that walk reaches the user
-// profile and dies on Windows' legacy `Application Data` junctions (EPERM), aborting
-// `next build`. outputFileTracingRoot already scopes tracing to projectRoot, so the
-// pattern is only kept for the workspace bundling mode (cli/scripts/build-cli.js)
-// that traces hoisted node_modules from the parent directory.
+// `../../**/*` points outside the project root, which Turbopack rejects outright:
+// "glob '../../**/*' is invalid, it has a prefix that navigates out of the project
+// root". outputFileTracingRoot already scopes tracing to projectRoot, so keep the
+// pattern only for the workspace bundling mode (cli/scripts/build-cli.js) that
+// traces hoisted node_modules from the parent directory.
 const tracingExcludes = ["./gitbook/**/*", "./node_modules/.cache/**/*"];
 if (process.env.NEXT_TRACING_ROOT_MODE === "workspace") tracingExcludes.push("../../**/*");
 
