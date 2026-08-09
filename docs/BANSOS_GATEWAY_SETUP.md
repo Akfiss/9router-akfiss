@@ -206,6 +206,40 @@ above), you're responsible for your own restart-on-boot mechanism (Task
 Scheduler "At log on" trigger running the start command is the simplest
 option) — there's no `npm run`-based service installer here either.
 
+## Day-to-day operation — the `9router-akfiss` command
+
+Once the setup above is done, you should not need to repeat any of it.
+`scripts/9router-akfiss.ps1` wraps the whole stop → build → start → verify
+cycle — including the EPERM build workaround from the Windows build note —
+behind a single verb.
+
+Install the shim once, then it works from any directory:
+
+```powershell
+if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force }
+Add-Content $PROFILE "function 9router-akfiss { & '<path-to-repo>\scripts\9router-akfiss.ps1' @args }"
+. $PROFILE
+```
+
+| Command | What it does |
+| --- | --- |
+| `9router-akfiss` | Start the already-built server (default verb) |
+| `9router-akfiss stop` | Stop the scheduled task and free the port |
+| `9router-akfiss restart` | Stop, then start — no rebuild |
+| `9router-akfiss status` | Build ID, task state, port, cloudflared, and the local + tunnel health codes |
+| `9router-akfiss build` | Stop → production build (HOME workaround applied) → start → status |
+| `9router-akfiss deploy` | `git pull origin main` → build → start → status |
+
+The script derives the repo root from its own location, so it operates on
+whichever checkout it lives in — run the copy in your main checkout, not one
+in a git worktree, or you'll build the wrong tree.
+
+`status` prints the same three checks as the Validation section below:
+`/login` on localhost should be `200`, `/v1/models` on the public host should
+be `401` (unauthenticated — only our own gate can produce that, so it proves
+the tunnel reaches the origin), and `/dashboard` on the public host should be
+`404` (the ingress `path` rule keeps the dashboard private).
+
 ## Expected downtime — read this before you rely on this hostname
 
 This is a tunnel to **one physical machine**, not a redundant cloud
