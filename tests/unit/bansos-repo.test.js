@@ -126,6 +126,57 @@ describe("bansosRepo — users", () => {
     const tooSmall = await db.listBansosUsers({ pageSize: 0 });
     expect(tooSmall.pagination.pageSize).toBe(1);
   });
+
+  it("deleteBansosUser removes the user and cascades to their keys, leaving siblings untouched", async () => {
+    const db = await loadDb();
+    const alice = await db.createBansosUser({ name: "Alice" });
+    const bob = await db.createBansosUser({ name: "Bob" });
+    await db.createBansosKeyRecord({ userId: alice.id, name: "a1", keyHash: "hash-a1", keyPrefix: "bns_a1" });
+    await db.createBansosKeyRecord({ userId: alice.id, name: "a2", keyHash: "hash-a2", keyPrefix: "bns_a2" });
+    await db.createBansosKeyRecord({ userId: bob.id, name: "b1", keyHash: "hash-b1", keyPrefix: "bns_b1" });
+
+    const result = await db.deleteBansosUser(alice.id);
+
+    expect(result.user).toMatchObject({ id: alice.id, name: "Alice" });
+    expect(result.deletedKeyCount).toBe(2);
+    expect(await db.getBansosUserById(alice.id)).toBeNull();
+    expect((await db.listBansosKeysByUser(alice.id)).pagination.totalItems).toBe(0);
+
+    // The keys are credentials — a deleted account's key must not stay
+    // resolvable, or it would still authenticate at the gate.
+    expect(await db.getBansosKeyByHash("hash-a1")).toBeNull();
+
+    // Bob is a sibling, not a dependant.
+    expect(await db.getBansosUserById(bob.id)).toMatchObject({ name: "Bob" });
+    expect((await db.listBansosKeysByUser(bob.id)).pagination.totalItems).toBe(1);
+  });
+
+  it("deleteBansosUser returns null for an unknown id, so the route can answer 404", async () => {
+    const db = await loadDb();
+    expect(await db.deleteBansosUser("no-such-user")).toBeNull();
+  });
+
+  it("deleteBansosUser keeps the prompt audit trail — removing an account must not erase what it did", async () => {
+    const db = await loadDb();
+    const user = await db.createBansosUser({ name: "Alice" });
+    const key = await db.createBansosKeyRecord({
+      userId: user.id, name: "a1", keyHash: "hash-a1", keyPrefix: "bns_a1",
+    });
+    await db.insertBansosPromptAudit({
+      requestId: "req_del_1",
+      userId: user.id,
+      apiKeyId: key.id,
+      publicModel: "public-model",
+      internalModel: "internal-model",
+      expiresAt: new Date(Date.now() + 7 * 86400000).toISOString(),
+    });
+
+    await db.deleteBansosUser(user.id);
+
+    // The row outlives its owner on purpose. It ages out on the seven-day
+    // retention sweep (clearExpiredBansosPrompts), not on account deletion.
+    expect((await db.listBansosPromptAudits({ pageSize: 10 })).pagination.totalItems).toBe(1);
+  });
 });
 
 describe("bansosRepo — API keys", () => {

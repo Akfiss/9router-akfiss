@@ -110,6 +110,34 @@ export async function updateBansosUser(id, data = {}) {
   return result;
 }
 
+// Hard-deletes a gateway user together with every API key they own, in one
+// transaction — the keys are credentials, so they must not outlive the
+// account they belong to.
+//
+// Deliberately leaves bansosPromptAudit and usageHistory alone: removing an
+// account must not erase the record of what that account did. The audit rows
+// age out on their own seven-day retention (clearExpiredBansosPrompts), and
+// the usage rows stay so historical request/cost totals don't shift
+// retroactively. Both reference userId without a FOREIGN KEY (see
+// schema.js), so nothing cascades implicitly and those rows simply become
+// unattached — which is the intent here, not an oversight.
+//
+// Returns { user, deletedKeyCount } or null when no such user exists, so the
+// caller can answer 404 rather than a silent success.
+export async function deleteBansosUser(id) {
+  const db = await getAdapter();
+  let result = null;
+  db.transaction(() => {
+    const row = db.get(`SELECT * FROM bansosUsers WHERE id = ?`, [id]);
+    if (!row) return;
+    const deletedKeyCount = db.get(`SELECT COUNT(*) as c FROM bansosApiKeys WHERE userId = ?`, [id])?.c ?? 0;
+    db.run(`DELETE FROM bansosApiKeys WHERE userId = ?`, [id]);
+    db.run(`DELETE FROM bansosUsers WHERE id = ?`, [id]);
+    result = { user: rowToUser(row), deletedKeyCount };
+  });
+  return result;
+}
+
 // ── API keys ───────────────────────────────────────────────────────────
 
 // Deliberately excludes keyHash — see file-level note.

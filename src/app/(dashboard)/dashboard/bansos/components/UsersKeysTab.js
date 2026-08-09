@@ -12,6 +12,7 @@ import {
   fetchGatewayUsers,
   createGatewayUser,
   updateGatewayUser,
+  deleteGatewayUser,
   fetchUserKeys,
   createUserKey,
   revokeUserKey,
@@ -49,6 +50,13 @@ export default function UsersKeysTab() {
   const [revoking, setRevoking] = useState(false);
   const [rotatingKeyId, setRotatingKeyId] = useState(null);
   const [actionError, setActionError] = useState("");
+
+  // Separate from actionError, which only renders inside the Keys card — a
+  // delete can be triggered with no user selected, so its failure needs a
+  // home in the Users card or it would be invisible.
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deletingUser, setDeletingUser] = useState(false);
+  const [usersError, setUsersError] = useState("");
 
   const loadUsers = useCallback(async () => {
     setLoadingUsers(true);
@@ -228,6 +236,42 @@ export default function UsersKeysTab() {
     }
   };
 
+  const handleDeleteConfirm = async () => {
+    if (!deleteTarget) return;
+    setDeletingUser(true);
+    setUsersError("");
+    try {
+      const res = await deleteGatewayUser(deleteTarget.id);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setUsersError(data.error || "Failed to delete user");
+        return;
+      }
+
+      // The Keys card renders off selectedUser; leaving it pointed at a
+      // deleted user would keep showing keys that no longer exist.
+      if (selectedUser?.id === deleteTarget.id) {
+        setSelectedUser(null);
+        setKeys([]);
+        setActionError("");
+      }
+
+      // Deleting the only row on a trailing page would otherwise strand the
+      // admin on an empty page. Stepping back re-runs loadUsers via the
+      // page effect, so don't also call it here.
+      if (users.length === 1 && usersPagination.page > 1) {
+        setUsersPagination((prev) => ({ ...prev, page: prev.page - 1 }));
+      } else {
+        await loadUsers();
+      }
+    } catch (error) {
+      setUsersError("An error occurred");
+    } finally {
+      setDeletingUser(false);
+      setDeleteTarget(null);
+    }
+  };
+
   return (
     <div className="flex min-w-0 flex-col gap-6">
       <Card
@@ -240,6 +284,7 @@ export default function UsersKeysTab() {
           </Button>
         }
       >
+        {usersError && <p className="pb-3 text-sm text-red-500">{usersError}</p>}
         {loadingUsers ? (
           <div className="p-8 text-center text-text-muted">Loading...</div>
         ) : users.length === 0 ? (
@@ -254,6 +299,15 @@ export default function UsersKeysTab() {
                     Keys
                   </Button>
                   <Button size="sm" variant="ghost" icon="edit" onClick={() => openEdit(user)} />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon="delete"
+                    onClick={() => {
+                      setUsersError("");
+                      setDeleteTarget(user);
+                    }}
+                  />
                 </>
               }
             >
@@ -455,6 +509,18 @@ export default function UsersKeysTab() {
         cancelText="Cancel"
         variant="danger"
         loading={revoking}
+      />
+
+      <ConfirmModal
+        isOpen={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteConfirm}
+        title="Delete Gateway User"
+        message={`Permanently delete "${deleteTarget?.name}" and every API key they own? Clients using those keys lose access immediately and this cannot be undone. Their request history and usage records are kept. To suspend access without deleting anything, edit the user and turn off Active instead.`}
+        confirmText="Delete"
+        cancelText="Cancel"
+        variant="danger"
+        loading={deletingUser}
       />
     </div>
   );

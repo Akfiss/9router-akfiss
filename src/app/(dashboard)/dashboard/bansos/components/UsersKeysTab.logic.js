@@ -79,6 +79,15 @@ export async function updateGatewayUser(userId, patch) {
   });
 }
 
+// Permanent removal, as opposed to updateGatewayUser({ isActive: false }),
+// which only suspends the account. Bodyless by convention — the id travels
+// in the path. See src/app/api/bansos/users/[id]/route.js's DELETE handler
+// for what the server cascades (keys) and what it keeps (prompt audit,
+// usage history).
+export async function deleteGatewayUser(userId) {
+  return fetch(`/api/bansos/users/${userId}`, { method: "DELETE" });
+}
+
 export async function fetchUserKeys(userId, { page = 1, pageSize = 20 } = {}) {
   const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
   const res = await fetch(`/api/bansos/users/${userId}/keys?${params}`);

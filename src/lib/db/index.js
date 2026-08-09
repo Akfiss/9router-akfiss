@@ -69,7 +69,7 @@ export {
 
 // Bansos Gateway (public API gateway) — users, API keys, prompt audit
 export {
-  createBansosUser, listBansosUsers, getBansosUserById, updateBansosUser,
+  createBansosUser, listBansosUsers, getBansosUserById, updateBansosUser, deleteBansosUser,
   createBansosKeyRecord, getBansosKeyByHash, listBansosKeysByUser,
   revokeBansosKey, rotateBansosKeyRecord, touchBansosKeyLastUsed,
   insertBansosPromptAudit, finalizeBansosPromptAudit, listBansosPromptAudits,

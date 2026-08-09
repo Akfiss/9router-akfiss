@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   listBansosUsers: vi.fn(),
   getBansosUserById: vi.fn(),
   updateBansosUser: vi.fn(),
+  deleteBansosUser: vi.fn(),
   listBansosKeysByUser: vi.fn(),
   revokeBansosKey: vi.fn(),
   listBansosPromptAudits: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("@/lib/db/index.js", () => ({
   listBansosUsers: mocks.listBansosUsers,
   getBansosUserById: mocks.getBansosUserById,
   updateBansosUser: mocks.updateBansosUser,
+  deleteBansosUser: mocks.deleteBansosUser,
   listBansosKeysByUser: mocks.listBansosKeysByUser,
   revokeBansosKey: mocks.revokeBansosKey,
   listBansosPromptAudits: mocks.listBansosPromptAudits,
@@ -51,7 +53,7 @@ vi.mock("@/lib/bansos/rateLimiter.js", () => ({
 }));
 
 const { GET: usersGET, POST: usersPOST } = await import("../../src/app/api/bansos/users/route.js");
-const { GET: userGET, PATCH: userPATCH } = await import("../../src/app/api/bansos/users/[id]/route.js");
+const { GET: userGET, PATCH: userPATCH, DELETE: userDELETE } = await import("../../src/app/api/bansos/users/[id]/route.js");
 const { GET: userKeysGET, POST: userKeysPOST } = await import("../../src/app/api/bansos/users/[id]/keys/route.js");
 const { DELETE: keyDELETE, POST: keyPOST } = await import("../../src/app/api/bansos/keys/[id]/route.js");
 const { GET: settingsGET, PATCH: settingsPATCH } = await import("../../src/app/api/bansos/settings/route.js");
@@ -250,6 +252,39 @@ describe("PATCH /api/bansos/users/[id]", () => {
     });
     const body = await response.json();
     expect(body.user.isActive).toBe(false);
+  });
+});
+
+describe("DELETE /api/bansos/users/[id]", () => {
+  function deleteRequest(id) {
+    return new Request(`https://local/api/bansos/users/${id}`, { method: "DELETE" });
+  }
+
+  it("returns 404 when deleting an unknown user", async () => {
+    mocks.deleteBansosUser.mockResolvedValue(null);
+    const response = await userDELETE(deleteRequest("usr_x"), params({ id: "usr_x" }));
+    expect(response.status).toBe(404);
+  });
+
+  it("deletes the user and reports how many keys went with it", async () => {
+    mocks.deleteBansosUser.mockResolvedValue({
+      user: { id: "usr_1", name: "Dinsos Test", isActive: true },
+      deletedKeyCount: 2,
+    });
+
+    const response = await userDELETE(deleteRequest("usr_1"), params({ id: "usr_1" }));
+
+    expect(response.status).toBe(200);
+    expect(mocks.deleteBansosUser).toHaveBeenCalledWith("usr_1");
+    const body = await response.json();
+    expect(body.user.id).toBe("usr_1");
+    expect(body.deletedKeyCount).toBe(2);
+  });
+
+  it("does not fall back to deactivation — DELETE never calls updateBansosUser", async () => {
+    mocks.deleteBansosUser.mockResolvedValue({ user: { id: "usr_1" }, deletedKeyCount: 0 });
+    await userDELETE(deleteRequest("usr_1"), params({ id: "usr_1" }));
+    expect(mocks.updateBansosUser).not.toHaveBeenCalled();
   });
 });
 

@@ -33,6 +33,7 @@ import {
   fetchGatewayUsers,
   createGatewayUser,
   updateGatewayUser,
+  deleteGatewayUser,
   fetchUserKeys,
   createUserKey,
   revokeUserKey,
@@ -279,6 +280,14 @@ describe("UsersKeysTab: users fetch/mutate call shapes", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ isActive: false }),
     });
+  });
+
+  it("deleteGatewayUser issues a bodyless DELETE — distinct from the isActive:false suspend above", async () => {
+    const fetchMock = stubFetch(async () => jsonResponse({ user: { id: "usr_1" }, deletedKeyCount: 2 }));
+    const res = await deleteGatewayUser("usr_1");
+    expect(fetchMock).toHaveBeenCalledWith("/api/bansos/users/usr_1", { method: "DELETE" });
+    const body = await res.json();
+    expect(body.deletedKeyCount).toBe(2);
   });
 });
 
