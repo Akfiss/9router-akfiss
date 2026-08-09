@@ -73,13 +73,24 @@ async function aggregateAcrossUsers() {
 }
 
 // Pure fetch probe — no tunnel/cloudflared credential or process management
-// here (out of scope for this MVP per the brief). Never throws: any failure
-// (timeout, DNS, network error, non-2xx) collapses to reachable:false.
+// here (out of scope for this MVP per the brief). Never throws: a transport
+// failure (timeout, DNS, network error) collapses to reachable:false.
+//
+// The probe is deliberately unauthenticated, so a HEALTHY gateway answers
+// `401 Unauthorized` — not 2xx. Treating only res.ok as reachable made this
+// card report "Unreachable" permanently even with the tunnel up and real
+// traffic being served. What we're measuring is whether the request reaches
+// OUR origin through Cloudflare, and a 401 is the strongest possible proof
+// of that: it can only be produced by the Bansos gate itself, after the
+// tunnel delivered the request. Cloudflare's own failure pages (502, and
+// 530/error 1033 when the tunnel is down) never carry a 401, so they still
+// fall through to reachable:false — as does a 404, which would mean the
+// ingress `path` rule no longer matches /v1/models.
 async function probeBansosPublicHost() {
   const url = `https://${BANSOS_HOST}/v1/models`;
   try {
     const res = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-    return { reachable: res.ok, status: res.status };
+    return { reachable: res.ok || res.status === 401, status: res.status };
   } catch (error) {
     return { reachable: false, error: error?.message || "probe failed" };
   }

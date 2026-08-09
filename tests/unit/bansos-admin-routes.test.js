@@ -590,6 +590,30 @@ describe("GET /api/bansos/overview", () => {
     expect(String(url)).toBe("https://api.priaoslo.web.id/v1/models");
   });
 
+  it("treats a 401 from the public host as reachable — the probe is unauthenticated, so 401 is the healthy answer", async () => {
+    setupOverviewMocks();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 401 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await overviewGET(new Request("https://local/api/bansos/overview?probe=true"));
+
+    const body = await response.json();
+    expect(body.publicHost.reachable).toBe(true);
+    expect(body.publicHost.status).toBe(401);
+  });
+
+  it("reports reachable:false when Cloudflare answers for a down tunnel (530) instead of the gate", async () => {
+    setupOverviewMocks();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 530 });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await overviewGET(new Request("https://local/api/bansos/overview?probe=true"));
+
+    const body = await response.json();
+    expect(body.publicHost.reachable).toBe(false);
+    expect(body.publicHost.status).toBe(530);
+  });
+
   it("reports a structured reachable:false on probe failure (timeout/network error) instead of throwing", async () => {
     setupOverviewMocks();
     const fetchMock = vi.fn().mockRejectedValue(new Error("network down"));
