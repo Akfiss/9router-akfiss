@@ -103,6 +103,24 @@ beforeEach(() => {
   executorState.next.length = 0;
 });
 
+// dashboardGuard.js's isLocalRequest() now requires proof (x-9r-peer-token,
+// stamped by custom-server.js from the TCP socket) before trusting
+// x-9r-real-ip or a bare loopback Host — see hasTrustedPeerHeaders()
+// (GHSA-pjm4-8fpg-f9p6). Tests that need to simulate a genuine local
+// request spread LOCAL_PEER_HEADERS into their request headers.
+const PEER_TOKEN = "e2e-peer-token-fixture";
+const LOCAL_PEER_HEADERS = { "x-9r-peer-token": PEER_TOKEN, "x-9r-real-ip": "127.0.0.1" };
+const originalPeerToken = process.env.NINEROUTER_PEER_TOKEN;
+
+beforeEach(() => {
+  process.env.NINEROUTER_PEER_TOKEN = PEER_TOKEN;
+});
+
+afterEach(() => {
+  if (originalPeerToken === undefined) delete process.env.NINEROUTER_PEER_TOKEN;
+  else process.env.NINEROUTER_PEER_TOKEN = originalPeerToken;
+});
+
 // ── Real temporary SQLite DB per test (same pattern as bansos-repo.test.js) ─
 let tempDir;
 const originalDataDir = process.env.DATA_DIR;
@@ -377,6 +395,7 @@ describe("Forged Host and forwarded-identity combinations", () => {
       pathname: "/v1/chat/completions", method: "POST",
       headers: {
         host: "localhost",
+        ...LOCAL_PEER_HEADERS,
         "x-9r-bansos-user-id": "forged-user",
         "x-9r-bansos-key-id": "forged-key",
       },
@@ -732,9 +751,9 @@ describe("Kill switch — blocks public traffic while local chat is unaffected",
     executorState.next.push({ response: jsonSuccessResponse() });
     const { response } = await dispatch(stack, {
       pathname: "/v1/chat/completions", method: "POST",
-      // Loopback Host + no forwarding headers -> isLocalRequest() is true,
+      // Loopback Host + trusted-peer proof -> isLocalRequest() is true,
       // so canAccessPublicLlmApi() short-circuits before any key check.
-      headers: { host: "localhost" },
+      headers: { host: "localhost", ...LOCAL_PEER_HEADERS },
       body: chatBody({ model: "gcli/grok-4.5" }),
     });
 
