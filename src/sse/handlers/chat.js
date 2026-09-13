@@ -8,6 +8,7 @@ import {
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
+import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -23,6 +24,7 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 import { isBansosHost, validateBansosModel, bansosError } from "@/lib/bansos/policy.js";
 import { PUBLIC_MODEL as BANSOS_PUBLIC_MODEL, INTERNAL_MODEL as BANSOS_INTERNAL_MODEL, BANSOS_LIMITS } from "@/lib/bansos/constants.js";
 import { acquireBansosChat } from "@/lib/bansos/rateLimiter.js";
@@ -220,6 +222,14 @@ export async function handleChat(request, clientRawRequest = null) {
   }
 
   const settings = await getSettings();
+
+  // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
+  // no combo, alias or provider/model pair, so it must not reach resolution.
+  // The capability travels in the anthropic-beta header, forwarded as-is.
+  // Strip it before the Bansos branch too, so validateBansosModel() below
+  // compares against the clean model name.
+  const { model: strippedModel, contextMarker } = stripModelContextMarker(body.model);
+  if (contextMarker) body.model = strippedModel;
 
   // --- Bansos Gateway branch --------------------------------------------
   // Gate strictly on the Host header via isBansosHost(), NEVER on the mere
@@ -476,7 +486,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
         const errorMsg = lastError || credentials.lastError || "Unavailable";
-        const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
+        const status = HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
         releaseBansosLease(bansosContext);
         finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: status, errorCategory: "accounts_rate_limited" });
@@ -524,6 +534,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
       headroomEnabled: !!chatSettings.headroomEnabled,
       headroomUrl: chatSettings.headroomUrl || DEFAULT_HEADROOM_URL,
       headroomCompressUserMessages: !!chatSettings.headroomCompressUserMessages,
+      headroomTimeoutMs: chatSettings.headroomTimeoutMs,
       cavemanEnabled: !!chatSettings.cavemanEnabled,
       cavemanLevel: chatSettings.cavemanLevel || "full",
       ponytailEnabled: !!chatSettings.ponytailEnabled,
@@ -546,6 +557,8 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
       },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
+        // "Consecutive" strikes: a success clears the breaker for this pair.
+        clearAntigravityStrikes(credentials.connectionId, model);
       },
       bansosContext
     });
@@ -555,8 +568,22 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
     // — those own the bansosContext release from here on (Task 9), not us.
     if (result.success) return result.response;
 
-    // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
+    // Antigravity 409/429: refresh live quota to get exact resetAt before locking
+    let quotaResetMs = null;
+    let resetsAtMs = result.resetsAtMs;
+    if (provider === "antigravity" && (result.status === 409 || result.status === 429)) {
+      quotaResetMs = await handleAntigravityQuotaError(
+        credentials.connectionId, result.status, model,
+        refreshedCredentials.accessToken, credentials.providerSpecificData
+      );
+      if (quotaResetMs) resetsAtMs = quotaResetMs;
+    }
+
+    // Exhausted Antigravity model is blocked only in RAM cache until upstream resetAt.
+    // Do not persist a modelLock_* for this path.
+    const shouldFallback = provider === "antigravity" && quotaResetMs
+      ? true
+      : (await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs)).shouldFallback;
 
     if (shouldFallback) {
       log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
