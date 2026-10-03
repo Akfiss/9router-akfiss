@@ -16,6 +16,7 @@ import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
 import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { upstreamResponseHeaders } from "open-sse/utils/upstreamHeaders.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -380,7 +381,8 @@ export async function handleChat(request, clientRawRequest = null) {
     });
   }
 
-  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext);
+  const requestedModel = contextMarker ? `${modelStr.slice(modelStr.indexOf("/") + 1)}[${contextMarker}]` : null;
+  return handleSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext, requestedModel);
 }
 
 /**
@@ -396,21 +398,17 @@ export async function handleChat(request, clientRawRequest = null) {
  * release-before-return calls inside dispatchSingleModelChat below. It does
  * NOT release on success — a successful hand-off is Task 9's to release.
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, bansosContext = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, bansosContext = null, requestedModel = null) {
   try {
-    return await dispatchSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext);
+    return await dispatchSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext, requestedModel);
   } catch (err) {
     releaseBansosLease(bansosContext);
-    // Unhandled exception surfaces uncaught out of handleChat — Next.js's
-    // route-handler wrapper turns that into a bare 500 (no route in this
-    // codebase wraps handleChat in its own try/catch; see route.js files
-    // under src/app/api/v1*/), so 500 is the accurate httpStatus here.
     finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: 500, errorCategory: "dispatch_exception" });
     throw err;
   }
 }
 
-async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext) {
+async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request, apiKey, bansosContext, requestedModel) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -478,9 +476,10 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
   const excludeConnectionIds = new Set();
   let lastError = null;
   let lastStatus = null;
+  let lastHeaders = null;
 
   while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { requestedModel: requestedModel || model });
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -490,7 +489,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
         releaseBansosLease(bansosContext);
         finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: status, errorCategory: "accounts_rate_limited" });
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman, lastHeaders);
       }
       if (excludeConnectionIds.size === 0) {
         log.warn("AUTH", `No active credentials for provider: ${provider}`);
@@ -501,7 +500,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
       log.warn("CHAT", "No more accounts available", { provider });
       releaseBansosLease(bansosContext);
       finalizeBansosPromptAudit(bansosContext, { status: "error", httpStatus: lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, errorCategory: "no_more_accounts" });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
+      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable", lastHeaders);
     }
 
     // Account selection shown in the unified "▶" line (acc:...)
@@ -546,6 +545,8 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
       pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
       onPxpipeEvent: appendPxpipeEvent,
       providerThinking,
+      // Per-provider user overrides (custom headers / connect timeout) from settings
+      providerOverrides: (chatSettings.providerOverrides || {})[provider] || null,
       // Detect source format by endpoint + body
       sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
       onCredentialsRefreshed: async (newCreds) => {
@@ -590,6 +591,7 @@ async function dispatchSingleModelChat(body, modelStr, clientRawRequest, request
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;
+      lastHeaders = upstreamResponseHeaders(result.response?.headers);
       continue;
     }
 
