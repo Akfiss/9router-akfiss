@@ -27,7 +27,7 @@ import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
 import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
-import { getKeyAccessContext, filterModelsListForKey } from "@/sse/services/keyAccess.js";
+import { getKeyAccessContext, filterModelsListForKey, enforceKeyAccess, filterAdapterModels } from "@/sse/services/keyAccess.js";
 import { isBansosHost, validateBansosModel, bansosError } from "@/lib/bansos/policy.js";
 import { PUBLIC_MODEL as BANSOS_PUBLIC_MODEL, INTERNAL_MODEL as BANSOS_INTERNAL_MODEL, BANSOS_LIMITS } from "@/lib/bansos/constants.js";
 import { acquireBansosChat } from "@/lib/bansos/rateLimiter.js";
@@ -188,7 +188,6 @@ async function resolveBansosChatRequest(request, body, settings) {
   return { body: internalBody, context };
 }
 
-import { getKeyAccessContext, enforceKeyAccess, filterAdapterModels } from "../services/keyAccess.js";
 import { resolveSmartChoice } from "../services/systemoneRouter.js";
 
 /**
